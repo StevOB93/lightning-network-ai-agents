@@ -1,29 +1,35 @@
+---
+layout: home
+title: "CSCI 499: AI Agents + Lightning Network"
+---
+
+Welcome to the CSCI 499 senior project exploring secure AI agents integrated with Lightning Network implementations.
+
+This site contains setup guides, research notes, system architecture, and project progress.
+
+---
+
 ## Navigation
+
 - [Setup Guides](setup/)
 - [AI Agent Research](agent/)
 - [System Architecture](architecture/)
-- [Meeting Notes](meetings/week-01)
+- [Meeting Notes](meetings/)
+- [Team Uploads](uploads)
 
 ---
-layout: home
-title: "Core Lightning Setup"
+
+## Project Goals
+
+- Run and document multiple Lightning Network implementations  
+- Integrate AI agents using MCP/A2A communication  
+- Apply cybersecurity principles for safe automation  
+- Produce a research paper and technical documentation  
+
 ---
 
-# Core Lightning Setup
-...
+## Current Focus
 
-This site contains project documentation, setup guides, and progress updates.
-
----
-title: Setup Guides
----
-
-# Setup Guides
-- [Core Lightning Setup](core-lightning)
-
-## Quick Links
-- Core Lightning setup (coming soon)
-- MCP/A2A research (coming soon)
-- System design (coming soon)
-
-
+- Core Lightning local setup  
+- AI agent communication research  
+- System design and threat modeling  
