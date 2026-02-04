@@ -1,4 +1,7 @@
-# CSCI 499: AI Agents + Lightning Network
+---
+layout: home
+title: ""
+---
 
 This site contains project documentation, setup guides, and progress updates.
 
