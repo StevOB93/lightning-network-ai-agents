@@ -14,8 +14,6 @@ This site contains setup guides, research notes, system architecture, and projec
 - [Setup Guides](setup/)
 - [AI Agent Research](agent/)
 - [System Architecture](architecture/)
-- [Meeting Notes](meetings/)
-- [Team Uploads](uploads)
 
 ---
 
