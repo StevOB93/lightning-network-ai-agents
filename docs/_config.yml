@@ -1,10 +1,4 @@
 theme: minima
-title: CSCI 499 Project
-description: AI Agents + Lightning Network
-
+title: "CSCI 499 Project"
+description: "AI Agents + Lightning Network"
 markdown: kramdown
-
-show_downloads: false
-
-github:
-  is_project_page: true
