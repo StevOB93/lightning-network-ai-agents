@@ -1,0 +1,32 @@
+# config/network.defaults.yml
+#
+# This file defines network-wide defaults for ALL managed nodes.
+# It is the ONLY place where scale is defined.
+#
+# There must never be per-node configuration files.
+# Scaling the network should require changing a single value here.
+
+network:
+  # Number of Lightning nodes managed by this system.
+  # Increase this number to scale the network.
+  managed_nodes: 2
+
+  # Bitcoin network mode.
+  # regtest is required for local development and testing.
+  bitcoin_network: regtest
+
+paths:
+  # Root runtime directory (ephemeral, gitignored)
+  runtime: runtime
+
+  # Per-node Lightning data directories
+  nodes: runtime/nodes
+
+  # Centralized log storage for all nodes
+  logs: runtime/logs
+
+  # RPC socket files for lightning-cli communication
+  sockets: runtime/sockets
+
+  # Reserved directory for dynamically allocated ports
+  ports: runtime/ports
