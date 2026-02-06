@@ -1,133 +1,100 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-############################################
-# start.sh
+############################################################
+# LN_AI_Project :: start.sh
+# ----------------------------------------------------------
+# Purpose:
+#   - Start a single regtest Bitcoin node
+#   - Start a single regtest Core Lightning node
+#   - Write explicit config files so CLIs work predictably
 #
-# Responsibilities:
-#   - Start Bitcoin Core (regtest)
-#   - Create N managed Lightning nodes
-#   - Ensure no hard-coded identities or ports
-#   - Leave system ready for manual funding
-#
-# This script MUST be safe on a fresh clone.
-############################################
+# Contract:
+#   - install.sh has already been run successfully
+#   - No software installation happens here
+############################################################
 
-echo "▶ Starting lightning-network-ai-agents"
-
-# ------------------------------------------------------------
-# Resolve important paths
-# ------------------------------------------------------------
-
-# Absolute path to scripts/
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Absolute path to repo root
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+NODE_ID="node-1"
 
-# Load helper libraries
-source "$SCRIPT_DIR/lib/port_allocator.sh"
-source "$SCRIPT_DIR/lib/node_manager.sh"
+BITCOIN_DIR="$PROJECT_ROOT/runtime/bitcoin/$NODE_ID"
+LIGHTNING_DIR="$PROJECT_ROOT/runtime/lightning/$NODE_ID"
+LOG_DIR="$PROJECT_ROOT/logs/$NODE_ID"
 
-# ------------------------------------------------------------
-# Load network configuration
-# ------------------------------------------------------------
+RPC_PORT=18443
+P2P_PORT=18444
 
-CONFIG_FILE="$ROOT_DIR/config/network.defaults.yml"
+echo "[INFO] Creating runtime and log directories..."
+mkdir -p "$BITCOIN_DIR" "$LIGHTNING_DIR" "$LOG_DIR"
 
-# Extract values using simple parsing (YAML-lite)
-NODE_COUNT=$(grep managed_nodes "$CONFIG_FILE" | awk '{print $2}')
-BITCOIN_NETWORK=$(grep bitcoin_network "$CONFIG_FILE" | awk '{print $2}')
+############################################################
+# Write bitcoin.conf (NO QUOTING TRICKS)
+############################################################
+BITCOIN_CONF="$BITCOIN_DIR/bitcoin.conf"
 
-# ------------------------------------------------------------
-# Define runtime paths (all ephemeral)
-# ------------------------------------------------------------
+echo "[INFO] Writing bitcoin.conf..."
+cat > "$BITCOIN_CONF" <<EOF
+regtest=1
+server=1
+txindex=1
+daemon=1
 
-RUNTIME_DIR="$ROOT_DIR/runtime"
-NODES_DIR="$RUNTIME_DIR/nodes"
-LOGS_DIR="$RUNTIME_DIR/logs"
-SOCKETS_DIR="$RUNTIME_DIR/sockets"
-PORTS_DIR="$RUNTIME_DIR/ports"
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=$RPC_PORT
 
-mkdir -p "$NODES_DIR" "$LOGS_DIR" "$SOCKETS_DIR" "$PORTS_DIR"
+fallbackfee=0.0001
+EOF
 
-# ------------------------------------------------------------
-# Start Bitcoin Core (regtest)
-# ------------------------------------------------------------
-
-# These credentials are LOCAL ONLY and exist only in runtime/
-BITCOIN_RPC_PORT=18443
-BITCOIN_RPC_USER=rpcuser
-BITCOIN_RPC_PASSWORD=rpcpass
-
-BITCOIND_DIR="$RUNTIME_DIR/bitcoind"
-mkdir -p "$BITCOIND_DIR"
-
-# Only start bitcoind if it isn't already running
-if ! pgrep -f "bitcoind.*regtest" >/dev/null; then
-  echo "▶ Starting bitcoind (regtest)"
-
-  bitcoind \
-    -regtest \
-    -daemon \
-    -datadir="$BITCOIND_DIR" \
-    -rpcuser="$BITCOIN_RPC_USER" \
-    -rpcpassword="$BITCOIN_RPC_PASSWORD" \
-    -rpcport="$BITCOIN_RPC_PORT"
+############################################################
+# Start bitcoind
+############################################################
+if pgrep -x bitcoind >/dev/null; then
+  echo "[INFO] bitcoind already running."
 else
-  echo "✔ bitcoind already running"
+  echo "[INFO] Starting bitcoind (regtest)..."
+  bitcoind \
+    -datadir="$BITCOIN_DIR" \
+    -conf="$BITCOIN_CONF" \
+    -debuglogfile="$LOG_DIR/bitcoind.log"
 fi
 
-# Give bitcoind time to initialize RPC
 sleep 2
 
-# ------------------------------------------------------------
-# Start Lightning nodes
-# ------------------------------------------------------------
+############################################################
+# Write lightning config
+############################################################
+LIGHTNING_CONF="$LIGHTNING_DIR/config"
 
-for i in $(seq 1 "$NODE_COUNT"); do
-  # Logical node identifier
-  NODE_ID="node$i"
+echo "[INFO] Writing lightning config..."
+cat > "$LIGHTNING_CONF" <<EOF
+network=regtest
+bitcoin-datadir=$BITCOIN_DIR
+log-file=$LOG_DIR/lightningd.log
+EOF
 
-  echo "▶ Initializing $NODE_ID"
-
-  # Create filesystem layout
-  create_node_dirs "$NODE_ID"
-
-  # Dynamically allocate ports and paths
-  LIGHTNING_PORT=$(allocate_port)
-  RPC_SOCKET="$SOCKETS_DIR/$NODE_ID.sock"
-  LOG_FILE="$LOGS_DIR/$NODE_ID.log"
-  NODE_DIR="$NODES_DIR/$NODE_ID"
-
-  # Render node-specific config from template
-  sed \
-    -e "s|{{BITCOIN_NETWORK}}|$BITCOIN_NETWORK|g" \
-    -e "s|{{BITCOIN_RPC_PORT}}|$BITCOIN_RPC_PORT|g" \
-    -e "s|{{BITCOIN_RPC_USER}}|$BITCOIN_RPC_USER|g" \
-    -e "s|{{BITCOIN_RPC_PASSWORD}}|$BITCOIN_RPC_PASSWORD|g" \
-    -e "s|{{LIGHTNING_PORT}}|$LIGHTNING_PORT|g" \
-    -e "s|{{RPC_SOCKET}}|$RPC_SOCKET|g" \
-    -e "s|{{LOG_FILE}}|$LOG_FILE|g" \
-    "$ROOT_DIR/config/cln/lightning.conf.tpl" \
-    > "$NODE_DIR/lightning.conf"
-
-  # Start Lightning node in daemon mode
+############################################################
+# Start lightningd
+############################################################
+if pgrep -x lightningd >/dev/null; then
+  echo "[INFO] lightningd already running."
+else
+  echo "[INFO] Starting lightningd (regtest)..."
   lightningd \
-    --lightning-dir="$NODE_DIR" \
-    --conf="$NODE_DIR/lightning.conf" \
+    --lightning-dir="$LIGHTNING_DIR" \
     --daemon
-done
+fi
 
-# ------------------------------------------------------------
-# Final status
-# ------------------------------------------------------------
-
+echo "=================================================="
+echo " Nodes started successfully ✔"
 echo
-echo "✅ All managed Lightning nodes are running"
+echo " CLI commands:"
+echo "   bitcoin-cli -regtest -datadir=$BITCOIN_DIR getblockchaininfo"
+echo "   lightning-cli --lightning-dir=$LIGHTNING_DIR getinfo"
 echo
-echo "Next steps (manual validation):"
-echo "  1. Generate blocks with bitcoin-cli"
-echo "  2. Get a new address from each node"
-echo "  3. Fund nodes manually to confirm operation"
-echo
+echo " Logs:"
+echo "   Bitcoin   : $LOG_DIR/bitcoind.log"
+echo "   Lightning : $LOG_DIR/lightningd.log"
+echo "=================================================="

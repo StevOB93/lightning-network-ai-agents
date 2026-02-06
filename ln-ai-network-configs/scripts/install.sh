@@ -1,159 +1,157 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-############################################
-# lightning-network-ai-agents
-# install.sh
+############################################################
+# LN_AI_Project :: install.sh
+# ----------------------------------------------------------
+# Guarantees after success:
+#   - Bitcoin Core installed (official binaries)
+#   - Core Lightning installed (from source)
+#   - All known CLN build dependencies satisfied
+#   - Baseline runtime directories exist
 #
-# Host dependency installer & environment validator
-# Safe to re-run. Does NOT start any services.
-############################################
+# Explicitly NOT done here:
+#   - Core Lightning version pinning
+############################################################
 
-echo "▶ Installing dependencies for lightning-network-ai-agents"
+echo "=================================================="
+echo " LN_AI_Project :: install.sh"
+echo "=================================================="
 
-# ---- Helpers -------------------------------------------------
+############################################################
+# Resolve paths
+############################################################
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    return 1
-  fi
-  return 0
-}
+echo "[INFO] Project root: $PROJECT_ROOT"
 
-header() {
-  echo
-  echo "▶ $1"
-}
+############################################################
+# Normalize shell scripts (permissions + CRLF)
+############################################################
+echo "[INFO] Normalizing shell scripts..."
+find "$PROJECT_ROOT" -type f -name "*.sh" -exec chmod +x {} \; || true
+find "$PROJECT_ROOT" -type f -name "*.sh" -exec sed -i 's/\r$//' {} \; || true
 
-# ---- Platform checks ----------------------------------------
+############################################################
+# System update
+############################################################
+echo "[INFO] Updating system..."
+sudo apt update
 
-header "Detecting platform"
-
-if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "✖ This project requires Linux (WSL2 supported)"
-  exit 1
-fi
-
-if grep -qi microsoft /proc/version; then
-  echo "✔ WSL detected"
-else
-  echo "✔ Native Linux detected"
-fi
-
-# ---- Package manager ----------------------------------------
-
-header "Checking package manager"
-
-if require_cmd apt-get; then
-  PKG_MGR="apt-get"
-else
-  echo "✖ Unsupported package manager (apt-get required)"
-  exit 1
-fi
-
-# ---- Base system dependencies --------------------------------
-
-header "Installing base dependencies"
-
-sudo apt-get update -y
-
-sudo apt-get install -y \
+############################################################
+# System dependencies (FULL ANTICIPATED SET)
+############################################################
+echo "[INFO] Installing system dependencies..."
+sudo apt install -y \
   curl \
   wget \
-  jq \
-  bc \
-  lsof \
-  netcat-openbsd \
-  procps \
   ca-certificates \
   gnupg \
-  software-properties-common
+  tar \
+  jq \
+  git \
+  build-essential \
+  pkg-config \
+  libtool \
+  autoconf \
+  automake \
+  libsqlite3-dev \
+  libssl-dev \
+  libsodium-dev \
+  lowdown \
+  python3 \
+  python3-pip \
+  python3-venv \
+  python3-mako \
+  gettext \
+  libzmq3-dev \
+  net-tools
 
-# ---- Bitcoin Core --------------------------------------------
+############################################################
+# Bitcoin Core (official binaries)
+############################################################
+BITCOIN_VERSION="26.0"
+BITCOIN_URL="https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz"
 
-header "Checking Bitcoin Core"
-
-if ! require_cmd bitcoind; then
-  echo "▶ Installing Bitcoin Core"
-  sudo add-apt-repository -y ppa:bitcoin/bitcoin
-  sudo apt-get update -y
-  sudo apt-get install -y bitcoind bitcoin-cli
+if command -v bitcoind >/dev/null 2>&1; then
+  echo "[INFO] Bitcoin Core already installed."
 else
-  echo "✔ Bitcoin Core already installed"
+  echo "[INFO] Installing Bitcoin Core ${BITCOIN_VERSION}..."
+
+  TMP_DIR="$(mktemp -d)"
+  cd "$TMP_DIR"
+
+  curl -fLO "$BITCOIN_URL"
+  tar -xzf bitcoin-*.tar.gz
+
+  sudo install -m 0755 -o root -g root \
+    bitcoin-*/bin/* /usr/local/bin/
+
+  cd /
+  rm -rf "$TMP_DIR"
 fi
 
-# ---- Core Lightning ------------------------------------------
-
-header "Checking Core Lightning"
-
-if ! require_cmd lightningd; then
-  echo "▶ Installing Core Lightning"
-  sudo apt-get install -y lightningd
+############################################################
+# Core Lightning (build from source, UNPINNED)
+############################################################
+if command -v lightningd >/dev/null 2>&1; then
+  echo "[INFO] Core Lightning already installed."
 else
-  echo "✔ Core Lightning already installed"
+  echo "[INFO] Installing Core Lightning from source..."
+
+  TMP_DIR="$(mktemp -d)"
+  cd "$TMP_DIR"
+
+  git clone https://github.com/ElementsProject/lightning.git
+  cd lightning
+
+  ./configure
+  make -j"$(nproc)"
+  sudo make install
+
+  cd /
+  rm -rf "$TMP_DIR"
 fi
 
-# ---- Node.js (future AI / tooling support) -------------------
+############################################################
+# Verify binaries (HARD CONTRACT)
+############################################################
+echo "[INFO] Verifying installed binaries..."
 
-header "Checking Node.js (optional)"
+command -v bitcoind >/dev/null
+command -v bitcoin-cli >/dev/null
+command -v lightningd >/dev/null
+command -v lightning-cli >/dev/null
 
-if ! require_cmd node; then
-  echo "▶ Installing Node.js LTS"
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-  sudo apt-get install -y nodejs
-else
-  echo "✔ Node.js already installed"
+bitcoind --version
+lightningd --version
+
+############################################################
+# Project directory baseline
+############################################################
+echo "[INFO] Creating project directories..."
+
+mkdir -p "$PROJECT_ROOT/runtime/bitcoin"
+mkdir -p "$PROJECT_ROOT/runtime/lightning"
+mkdir -p "$PROJECT_ROOT/logs"
+mkdir -p "$PROJECT_ROOT/temp"
+
+############################################################
+# WSL stability notes (non-fatal)
+############################################################
+if grep -qi microsoft /proc/version; then
+  echo "[INFO] WSL detected."
+  echo "[INFO] Consider increasing inotify watches if scaling nodes:"
+  echo "       fs.inotify.max_user_watches=524288"
 fi
 
-# ---- Python (future AI / orchestration support) --------------
-
-header "Checking Python"
-
-if ! require_cmd python3; then
-  echo "▶ Installing Python 3"
-  sudo apt-get install -y python3 python3-pip
-else
-  echo "✔ Python 3 already installed"
-fi
-
-# ---- Directory sanity ----------------------------------------
-
-header "Validating repository structure"
-
-REQUIRED_DIRS=(
-  "scripts"
-  "config"
-  "runtime"
-  "ai"
-  "web"
-  "external"
-  "sandbox"
-  "docs"
-)
-
-for dir in "${REQUIRED_DIRS[@]}"; do
-  if [[ ! -d "$dir" ]]; then
-    echo "✖ Missing directory: $dir"
-    echo "  Run init-repo-structure.ps1 before install.sh"
-    exit 1
-  fi
-done
-
-echo "✔ Repository structure validated"
-
-# ---- Permissions ---------------------------------------------
-
-header "Setting script permissions"
-
-chmod +x scripts/*.sh || true
-chmod +x scripts/lib/*.sh || true
-
-# ---- Final ---------------------------------------------------
-
+############################################################
+# Done
+############################################################
+echo "=================================================="
+echo " Install complete ✔"
 echo
-echo "✅ install.sh completed successfully"
-echo
-echo "Next steps:"
-echo "  - Review config/network.defaults.yml (when created)"
-echo "  - Run ./scripts/start.sh to launch managed nodes"
-echo
+echo " Next step:"
+echo "   ./start.sh"
+echo "=================================================="
