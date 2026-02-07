@@ -45,3 +45,4 @@ bitcoin-cli -regtest -datadir="$BITCOIN_DIR" -rpcwallet="$WALLET_NAME" getbalanc
 
 echo "=================================================="
 echo " Regtest BTC is now spendable ✔"
+echo "=================================================="
