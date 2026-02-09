@@ -1,11 +1,29 @@
 #!/usr/bin/env bash
 
-# LN_AI_Project environment bootstrap
-# Source this from anywhere to get consistent paths
+############################################
+# Project root (MUST match actual repo)
+############################################
 
-export LN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LN_ROOT="$HOME/lightning-network-ai-agents/ln-ai-network"
 
-# Common paths (optional convenience)
+############################################
+# Derived paths
+############################################
+
 export LN_RUNTIME="$LN_ROOT/runtime"
 export LN_LOGS="$LN_ROOT/logs"
 export LN_SCRIPTS="$LN_ROOT/scripts"
+
+############################################
+# Bitcoin Core
+############################################
+
+export BITCOIND="/usr/local/bin/bitcoind"
+export BITCOIN_CLI="/usr/local/bin/bitcoin-cli"
+
+############################################
+# Core Lightning
+############################################
+
+export LIGHTNINGD="/usr/local/bin/lightningd"
+export LIGHTNING_CLI="/usr/local/bin/lightning-cli"
