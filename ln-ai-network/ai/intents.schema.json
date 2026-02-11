@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LN Agent Intent",
+  "type": "object",
+  "required": ["intent", "reason", "confidence", "evidence"],
+  "additionalProperties": false,
+  "properties": {
+    "intent": {
+      "type": "string",
+      "enum": ["open_channel", "set_fee", "rebalance", "pay_invoice", "noop"]
+    },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 280 },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "evidence": {
+      "type": "object",
+      "required": ["health", "observations"],
+      "additionalProperties": false,
+      "properties": {
+        "health": { "type": "object" },
+        "observations": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "maxItems": 20
+        }
+      }
+    },
+
+    "from_node": { "type": "integer", "minimum": 1 },
+    "to_node": { "type": "integer", "minimum": 1 },
+    "amount_sat": { "type": "integer", "minimum": 1 },
+
+    "node": { "type": "integer", "minimum": 1 },
+    "channel_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "ppm_fee": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "base_fee_msat": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+
+    "src_channel_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "dst_channel_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "max_fee_ppm": { "type": "integer", "minimum": 0, "maximum": 100000 },
+
+    "invoice": { "type": "string", "minLength": 5, "maxLength": 2048 },
+    "max_fee_sat": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "intent": { "const": "open_channel" } } },
+      "then": { "required": ["from_node", "to_node", "amount_sat"] }
+    },
+    {
+      "if": { "properties": { "intent": { "const": "set_fee" } } },
+      "then": { "required": ["node", "channel_id", "ppm_fee", "base_fee_msat"] }
+    },
+    {
+      "if": { "properties": { "intent": { "const": "rebalance" } } },
+      "then": { "required": ["node", "src_channel_id", "dst_channel_id", "amount_sat", "max_fee_ppm"] }
+    },
+    {
+      "if": { "properties": { "intent": { "const": "pay_invoice" } } },
+      "then": { "required": ["node", "invoice", "max_fee_sat"] }
+    }
+  ]
+}

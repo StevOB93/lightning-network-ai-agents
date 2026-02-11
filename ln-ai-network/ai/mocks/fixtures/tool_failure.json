@@ -1,0 +1,7 @@
+{
+  "simulate_tool_failure": true,
+  "fail_tools": ["network_health"],
+  "network_health": { "status": "unknown", "payment_success_rate": 0.0, "failures": {}, "notes": [] },
+  "ln_getinfo": { "1": {}, "2": {}, "3": {} },
+  "ln_listfunds": { "1": {}, "2": {}, "3": {} }
+}
