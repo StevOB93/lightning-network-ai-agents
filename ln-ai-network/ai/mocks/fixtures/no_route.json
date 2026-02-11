@@ -1,0 +1,18 @@
+{
+  "network_health": {
+    "status": "degraded",
+    "payment_success_rate": 0.72,
+    "failures": { "no_route": 9, "insufficient_liquidity": 1 },
+    "notes": ["routing gaps"]
+  },
+  "ln_getinfo": {
+    "1": { "node": 1, "alias": "A", "id": "02aa", "blockheight": 120, "num_peers": 1, "num_channels": 1, "warning": null },
+    "2": { "node": 2, "alias": "B", "id": "02bb", "blockheight": 120, "num_peers": 1, "num_channels": 1, "warning": null },
+    "3": { "node": 3, "alias": "C", "id": "02cc", "blockheight": 120, "num_peers": 0, "num_channels": 0, "warning": "isolated" }
+  },
+  "ln_listfunds": {
+    "1": { "node": 1, "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 }, "channels": [{ "channel_id": "1x1x0", "peer_node": 2, "capacity_sat": 200000, "local_sat": 180000, "remote_sat": 20000, "ppm_fee": 1000, "active": true }] },
+    "2": { "node": 2, "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 }, "channels": [{ "channel_id": "2x1x0", "peer_node": 1, "capacity_sat": 200000, "local_sat": 20000, "remote_sat": 180000, "ppm_fee": 1200, "active": true }] },
+    "3": { "node": 3, "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 }, "channels": [] }
+  }
+}
