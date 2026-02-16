@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ###############################################################################
-# PROJECT ROOT RESOLUTION
+# PATH RESOLUTION
 ###############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,22 +17,23 @@ echo "Nodes: $NODE_COUNT"
 echo "=================================================="
 
 ###############################################################################
-# PYTHON VIRTUAL ENVIRONMENT (DETERMINISTIC)
+# PYTHON ENVIRONMENT BOOTSTRAP
 ###############################################################################
 
-if [ ! -d "$PROJECT_ROOT/.venv" ]; then
+VENV_DIR="$PROJECT_ROOT/.venv"
+
+if [ ! -d "$VENV_DIR" ]; then
     echo "[SETUP] Creating virtual environment..."
-    python3 -m venv "$PROJECT_ROOT/.venv"
+    python3 -m venv "$VENV_DIR"
 fi
 
-source "$PROJECT_ROOT/.venv/bin/activate"
+echo "[SETUP] Activating virtual environment..."
+source "$VENV_DIR/bin/activate"
 
 if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
-    echo "[SETUP] Installing Python dependencies..."
+    echo "[SETUP] Installing dependencies..."
     pip install --quiet --upgrade pip
     pip install --quiet -r "$PROJECT_ROOT/requirements.txt"
-else
-    echo "[WARN] No requirements.txt found."
 fi
 
 ###############################################################################
@@ -55,5 +56,4 @@ fi
 
 echo "=================================================="
 echo "SYSTEM READY"
-echo "Bitcoin + Lightning + MCP + AI Agent Online"
 echo "=================================================="

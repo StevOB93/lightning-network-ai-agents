@@ -153,5 +153,5 @@ echo "=================================================="
 echo " Install complete ✔"
 echo
 echo " Next step:"
-echo "   ./start.sh"
+echo "   ./start.sh x (x for node #)"
 echo "=================================================="
