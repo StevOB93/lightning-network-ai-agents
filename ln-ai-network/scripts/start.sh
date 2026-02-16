@@ -1,88 +1,59 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <num_nodes>"
-  exit 1
-fi
-
-NUM_NODES="$1"
+###############################################################################
+# PROJECT ROOT RESOLUTION
+###############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../env.sh"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BITCOIN_DATADIR="$LN_RUNTIME/bitcoin/shared"
-BITCOIN_LOGDIR="$LN_LOGS/bitcoin/shared"
-BITCOIN_CONF="$BITCOIN_DATADIR/bitcoin.conf"
-COOKIE_FILE="$BITCOIN_DATADIR/regtest/.cookie"
+NODE_COUNT="${1:-2}"
 
-mkdir -p "$BITCOIN_DATADIR" "$BITCOIN_LOGDIR"
+echo "=================================================="
+echo "LN-AI FULL SYSTEM START"
+echo "Nodes: $NODE_COUNT"
+echo "=================================================="
 
-cat > "$BITCOIN_CONF" <<EOF
-regtest=1
-daemon=1
-server=1
-txindex=1
-fallbackfee=0.0002
+###############################################################################
+# PYTHON VIRTUAL ENVIRONMENT (DETERMINISTIC)
+###############################################################################
 
-[regtest]
-rpcbind=127.0.0.1
-rpcallowip=127.0.0.1
-rpcport=18443
-port=18444
-EOF
-
-if ! pgrep -f "bitcoind.*$BITCOIN_DATADIR" >/dev/null; then
-  echo "[INFO] Starting shared Bitcoin backend..."
-  "$BITCOIND" -conf="$BITCOIN_CONF" -datadir="$BITCOIN_DATADIR" \
-    >"$BITCOIN_LOGDIR/bitcoind.log" 2>&1
+if [ ! -d "$PROJECT_ROOT/.venv" ]; then
+    echo "[SETUP] Creating virtual environment..."
+    python3 -m venv "$PROJECT_ROOT/.venv"
 fi
 
-echo "[INFO] Waiting for Bitcoin RPC..."
-for _ in {1..30}; do
-  if [[ -f "$COOKIE_FILE" ]] && \
-     "$BITCOIN_CLI" -conf="$BITCOIN_CONF" -datadir="$BITCOIN_DATADIR" \
-       getblockchaininfo >/dev/null 2>&1; then
-    echo "[INFO] Bitcoin RPC ready"
-    break
-  fi
-  sleep 1
-done
+source "$PROJECT_ROOT/.venv/bin/activate"
 
-echo "[INFO] Starting Lightning nodes..."
+if [ -f "$PROJECT_ROOT/requirements.txt" ]; then
+    echo "[SETUP] Installing Python dependencies..."
+    pip install --quiet --upgrade pip
+    pip install --quiet -r "$PROJECT_ROOT/requirements.txt"
+else
+    echo "[WARN] No requirements.txt found."
+fi
 
-for n in $(seq 1 "$NUM_NODES"); do
-  LN_NODE_DIR="$LN_RUNTIME/lightning/node-$n"
-  LN_LOG_DIR="$LN_LOGS/lightning/node-$n"
-  mkdir -p "$LN_NODE_DIR" "$LN_LOG_DIR"
+###############################################################################
+# INFRASTRUCTURE
+###############################################################################
 
-  if pgrep -f "lightningd.*$LN_NODE_DIR" >/dev/null; then
-    continue
-  fi
+"$PROJECT_ROOT/scripts/startup/infra_boot.sh" "$NODE_COUNT"
 
-  "$LIGHTNINGD" \
-    --network=regtest \
-    --lightning-dir="$LN_NODE_DIR" \
-    --log-file="$LN_LOG_DIR/lightningd.log" \
-    --addr="127.0.0.1:$((9735 + n - 1))" \
-    --bitcoin-rpcconnect=127.0.0.1 \
-    --bitcoin-rpcport=18443 \
-    --bitcoin-datadir="$BITCOIN_DATADIR" \
-    --daemon
-done
+###############################################################################
+# CONTROL PLANE
+###############################################################################
 
-echo "[INFO] Waiting for Lightning RPCs..."
+"$PROJECT_ROOT/scripts/startup/control_plane_boot.sh"
 
-for n in $(seq 1 "$NUM_NODES"); do
-  for _ in {1..30}; do
-    if "$LIGHTNING_CLI" \
-         --network=regtest \
-         --lightning-dir="$LN_RUNTIME/lightning/node-$n" \
-         getinfo >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-done
+###############################################################################
+# AGENT
+###############################################################################
 
-echo "[SUCCESS] Bitcoin + Lightning fully started and synchronized"
+"$PROJECT_ROOT/scripts/startup/agent_boot.sh"
+
+echo "=================================================="
+echo "SYSTEM READY"
+echo "Bitcoin + Lightning + MCP + AI Agent Online"
+echo "=================================================="
