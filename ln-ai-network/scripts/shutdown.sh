@@ -13,19 +13,19 @@ echo "=================================================="
 # AGENT
 ###############################################################################
 
-./scripts/shutdown/agent_shutdown.sh
+./scripts/shutdown/1.agent_shutdown.sh
 
 ###############################################################################
 # CONTROL PLANE
 ###############################################################################
 
-./scripts/shutdown/control_plane_shutdown.sh
+./scripts/shutdown/2.control_plane_shutdown.sh
 
 ###############################################################################
 # INFRA
 ###############################################################################
 
-./scripts/shutdown/infra_shutdown.sh "$NODE_COUNT" "$RESET_MODE"
+./scripts/shutdown/3.infra_shutdown.sh "$NODE_COUNT" "$RESET_MODE"
 
 echo "=================================================="
 echo "SYSTEM SHUTDOWN COMPLETE"

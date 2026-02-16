@@ -40,19 +40,19 @@ fi
 # INFRASTRUCTURE
 ###############################################################################
 
-"$PROJECT_ROOT/scripts/startup/infra_boot.sh" "$NODE_COUNT"
+"$PROJECT_ROOT/scripts/startup/0.1.infra_boot.sh" "$NODE_COUNT"
 
 ###############################################################################
 # CONTROL PLANE
 ###############################################################################
 
-"$PROJECT_ROOT/scripts/startup/control_plane_boot.sh"
+"$PROJECT_ROOT/scripts/startup/0.2.control_plane_boot.sh"
 
 ###############################################################################
 # AGENT
 ###############################################################################
 
-"$PROJECT_ROOT/scripts/startup/agent_boot.sh"
+"$PROJECT_ROOT/scripts/startup/0.3.agent_boot.sh"
 
 echo "=================================================="
 echo "SYSTEM READY"
