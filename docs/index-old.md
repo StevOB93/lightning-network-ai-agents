@@ -1,6 +1,6 @@
 ---
 layout: home
-title: "CSCI 499: AI Agents + Lightning Network"
+title: "Old homepage"
 ---
 
 Welcome to the CSCI 499 senior project exploring secure AI agents integrated with Lightning Network implementations.
