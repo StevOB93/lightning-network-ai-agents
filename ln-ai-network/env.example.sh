@@ -1,0 +1,93 @@
+# ==============================================================
+# ln-ai-network — Environment Template (SAFE TO COMMIT)
+#
+# ✅ Commit THIS file to Git as ".env.example"
+# ❌ Do NOT commit a real ".env" (it will contain secrets)
+#
+# Setup for each developer:
+#   cp .env.example .env
+#   # edit .env and set OPENAI_API_KEY (and any overrides)
+#
+# Then load vars (from repo root):
+#   source env.sh
+#
+# Notes:
+# - env.sh will automatically source ".env" if it exists
+# - Keep your real key only in your local ".env"
+# ==============================================================
+
+
+############################################
+# LLM Provider Selection
+############################################
+# Supported: openai (more later)
+LLM_PROVIDER=openai
+
+
+############################################
+# OpenAI Settings (Adapter-Specific)
+############################################
+# IMPORTANT: Replace with your real key in your local ".env"
+# Example: OPENAI_API_KEY=sk-********************************
+OPENAI_API_KEY=__REPLACE_WITH_REAL_KEY__
+
+# Model name used by the OpenAI adapter
+OPENAI_MODEL=gpt-4o
+
+# Request timeout (seconds)
+OPENAI_TIMEOUT_S=60
+
+
+############################################
+# Agent Cadence / Control Plane
+############################################
+# Deterministic tick cadence (ms). Agent "wakes up" on this schedule.
+AGENT_TICK_MS=500
+
+# Hard minimum time between LLM requests (ms), even if RPM/TPM allow more
+LLM_MIN_INTERVAL_MS=1000
+
+# Max concurrent in-flight LLM requests per agent process (keep 1 for determinism)
+LLM_MAX_IN_FLIGHT=1
+
+
+############################################
+# Rate Limits (Set to your allocation)
+############################################
+# Requests Per Minute limit for the backend allocation used by this agent
+LLM_RPM=30
+
+# Tokens Per Minute limit for the backend allocation used by this agent
+LLM_TPM=60000
+
+
+############################################
+# Response / Prompt Growth Controls
+############################################
+# Max tokens the model is allowed to generate per call
+LLM_MAX_OUTPUT_TOKENS=512
+
+# Caps message history to prevent token runaway (system + last N-1 messages)
+LLM_MAX_HISTORY_MESSAGES=40
+
+# Caps tool output stored in history to avoid gigantic prompts
+LLM_MAX_TOOL_OUTPUT_CHARS=8000
+
+
+############################################
+# Backoff Policy (Deterministic)
+############################################
+# Base backoff delay (ms) for transient errors / rate limits
+LLM_BACKOFF_BASE_MS=1000
+
+# Maximum backoff delay (ms)
+LLM_BACKOFF_MAX_MS=30000
+
+# Deterministic jitter window (ms) — derived from step id (NOT random)
+LLM_BACKOFF_JITTER_MS=250
+
+# Circuit breaker opens after N consecutive failures
+LLM_CIRCUIT_BREAKER_AFTER=6
+
+# Circuit breaker open duration (ms)
+LLM_CIRCUIT_BREAKER_OPEN_MS=60000
