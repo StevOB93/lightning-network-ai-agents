@@ -1,86 +1,108 @@
+from __future__ import annotations
+
 import json
-from typing import Any, Dict, List
+import time
+import traceback
+from typing import Any, Dict
 
 from mcp.client.fastmcp import FastMCPClient
 
+
+###############################################################################
+# CONFIGURATION
+###############################################################################
+
+POLL_INTERVAL_SECONDS = 5
 MCP_NAME = "ln-tools"
 
 
-def build_observations(node_count: int) -> Dict[str, Any]:
-    """
-    Query MCP for network health and per-node balances.
-    """
+###############################################################################
+# AGENT CORE
+###############################################################################
 
-    client = FastMCPClient(MCP_NAME)
 
-    try:
-        # Network health
-        health = client.call("network_health")
+class LightningAgent:
+    def __init__(self) -> None:
+        self.mcp = FastMCPClient(MCP_NAME)
 
-        observations: List[Dict[str, Any]] = []
+    def observe(self) -> Dict[str, Any]:
+        """
+        Collect network state via MCP.
+        """
 
-        # Per-node funds
-        for n in range(1, node_count + 1):
-            lf = client.call("ln_listfunds", node=n)
-            observations.append({
-                "node": n,
-                "funds": lf
-            })
+        health = self.mcp.call("network_health")
 
-        return {
+        observations = {
             "health": health,
-            "observations": observations
         }
 
-    finally:
-        client.close()
+        return observations
 
+    def decide(self, observations: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Decide next action based on observations.
+        """
 
-def decide_intent(observations: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Simple deterministic intent logic.
-    """
+        result = observations.get("health", {}).get("result", {})
 
-    if "error" in observations.get("health", {}):
-        return {
-            "intent": "noop",
-            "reason": "Network health unavailable",
-            "confidence": 0.1,
-            "evidence": observations
-        }
-
-    return {
-        "intent": "observe_only",
-        "reason": "Network operational",
-        "confidence": 0.9,
-        "evidence": observations
-    }
-
-
-def main():
-    try:
-        node_count = 2  # For now deterministic; can parameterize later
-
-        observations = build_observations(node_count)
-        intent = decide_intent(observations)
-
-        print(json.dumps(intent, indent=2))
-
-    except Exception as e:
-        print(json.dumps({
-            "intent": "noop",
-            "reason": f"Agent runtime failure: {str(e)}",
-            "confidence": 0.1,
-            "evidence": {
-                "health": {
-                    "error": "runtime_failure"
-                },
-                "observations": [
-                    "exception"
-                ]
+        if result.get("status") == "ok":
+            return {
+                "intent": "observe_only",
+                "reason": "Network operational",
+                "confidence": 0.9,
             }
-        }, indent=2))
+
+        return {
+            "intent": "investigate",
+            "reason": "Network unhealthy",
+            "confidence": 0.5,
+        }
+
+    def act(self, decision: Dict[str, Any]) -> None:
+        """
+        Execute actions if needed.
+        """
+
+        if decision["intent"] == "observe_only":
+            return
+
+        # Future: call MCP methods to rebalance, open channels, etc.
+
+    def run(self) -> None:
+        """
+        Persistent control loop.
+        """
+
+        print("[AGENT] Persistent control loop started.")
+
+        while True:
+            try:
+                observations = self.observe()
+                decision = self.decide(observations)
+                self.act(decision)
+
+                print(json.dumps({
+                    "decision": decision,
+                    "observations": observations
+                }, indent=2))
+
+                time.sleep(POLL_INTERVAL_SECONDS)
+
+            except KeyboardInterrupt:
+                print("[AGENT] Shutdown requested.")
+                break
+
+            except Exception:
+                print("[AGENT] Runtime error:")
+                traceback.print_exc()
+                time.sleep(POLL_INTERVAL_SECONDS)
+
+
+###############################################################################
+# ENTRYPOINT
+###############################################################################
 
 
 if __name__ == "__main__":
-    main()
+    agent = LightningAgent()
+    agent.run()

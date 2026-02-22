@@ -16,26 +16,9 @@ echo "=================================================="
 
 AGENT_LOG="$RUNTIME_DIR/agent.log"
 AGENT_PID_FILE="$RUNTIME_DIR/agent.pid"
-MCP_PID_FILE="$RUNTIME_DIR/mcp.pid"
 
 ###############################################################################
-# VERIFY MCP IS RUNNING
-###############################################################################
-
-if [ ! -f "$MCP_PID_FILE" ]; then
-    echo "[FATAL] MCP not running."
-    exit 1
-fi
-
-MCP_PID=$(cat "$MCP_PID_FILE")
-
-if ! kill -0 "$MCP_PID" >/dev/null 2>&1; then
-    echo "[FATAL] MCP process not alive."
-    exit 1
-fi
-
-###############################################################################
-# START AGENT
+# PREVENT DUPLICATE AGENT
 ###############################################################################
 
 if [ -f "$AGENT_PID_FILE" ]; then
@@ -46,10 +29,16 @@ if [ -f "$AGENT_PID_FILE" ]; then
     fi
 fi
 
-echo "[AGENT] Starting AI agent..."
+###############################################################################
+# START PERSISTENT AGENT
+###############################################################################
 
-cd "$PROJECT_ROOT"
-"$PROJECT_ROOT/.venv/bin/python" -m ai.agent > "$AGENT_LOG" 2>&1 &
+echo "[AGENT] Starting persistent AI agent..."
+
+(
+    cd "$PROJECT_ROOT"
+    exec "$PROJECT_ROOT/.venv/bin/python" -u -m ai.agent
+) > "$AGENT_LOG" 2>&1 &
 
 AGENT_PID=$!
 echo "$AGENT_PID" > "$AGENT_PID_FILE"
@@ -58,7 +47,7 @@ sleep 2
 
 if ! kill -0 "$AGENT_PID" >/dev/null 2>&1; then
     echo "[FATAL] Agent failed to start."
-    tail -n 40 "$AGENT_LOG" || true
+    tail -n 50 "$AGENT_LOG" || true
     exit 1
 fi
 

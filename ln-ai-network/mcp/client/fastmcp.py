@@ -7,12 +7,19 @@ from typing import Any, Dict
 
 
 class FastMCPClient:
-    def __init__(self, module_path: str = "mcp.ln_mcp_server"):
-        self.module_path = module_path
+    """
+    Deterministic MCP client.
+
+    - Always launches the ln_mcp_server module
+    - Uses unbuffered mode
+    - Communicates over stdin/stdout JSON
+    """
+
+    def __init__(self, _service_name: str = "ln-tools"):
         self._id = 0
 
         self.process = subprocess.Popen(
-            [sys.executable, "-u", "-m", self.module_path],
+            [sys.executable, "-u", "-m", "mcp.ln_mcp_server"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -31,21 +38,17 @@ class FastMCPClient:
         if not self.process.stdin or not self.process.stdout:
             raise RuntimeError("MCP pipes unavailable")
 
-        print(f"[CLIENT] Sending: {request}")
-
         # Send request
         self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
 
-        # Check if process died
+        # Detect early exit
         if self.process.poll() is not None:
             stderr = self.process.stderr.read()
             raise RuntimeError(f"MCP process exited early: {stderr}")
 
         # Read response
         response_line = self.process.stdout.readline()
-
-        print(f"[CLIENT] Raw response: {response_line}")
 
         if not response_line:
             stderr = self.process.stderr.read()

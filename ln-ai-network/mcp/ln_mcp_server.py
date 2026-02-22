@@ -3,39 +3,32 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
+import sys
 from typing import Any, Dict
 
-from mcp.server.fastmcp import FastMCP
-
 
 ###############################################################################
-# MCP SERVER — Lightning Read-Only Interface
-#
-# - Deterministic
-# - Regtest only
-# - Multi-node aware
-# - Uses env.sh for absolute paths
-# - No execution capabilities
+# ENVIRONMENT LOADER
 ###############################################################################
-
-mcp = FastMCP("ln-tools")
-
-###############################################################################
-# Environment Loading
-###############################################################################
-
-BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent
-ENV_PATH = PROJECT_ROOT / "env.sh"
 
 
 def _load_env() -> None:
     """
-    Load env.sh into this Python process deterministically.
+    Load environment variables from env.sh safely.
+
+    Handles paths with spaces correctly by quoting the path.
     """
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env_path = os.path.join(project_root, "env.sh")
+
+    if not os.path.exists(env_path):
+        raise RuntimeError(f"env.sh not found at: {env_path}")
+
+    cmd = f'source "{env_path}" && env'
+
     proc = subprocess.run(
-        ["bash", "-c", f"source {ENV_PATH} && env"],
+        ["bash", "-c", cmd],
         capture_output=True,
         text=True,
         check=True,
@@ -46,128 +39,79 @@ def _load_env() -> None:
         os.environ[key] = value
 
 
-_load_env()
-
-LN_RUNTIME = os.environ.get("LN_RUNTIME")
-if not LN_RUNTIME:
-    raise RuntimeError("LN_RUNTIME not found in env.sh")
-
-
 ###############################################################################
-# Utility Helpers
+# MCP CORE
 ###############################################################################
 
-def _lightning_dir(node: int) -> str:
-    return f"{LN_RUNTIME}/lightning/node-{node}"
 
-
-def _run_lightning_cli(node: int, args: list[str]) -> Dict[str, Any]:
+def _handle_network_health() -> Dict[str, Any]:
     """
-    Run lightning-cli in regtest mode against a specific node.
+    Basic deterministic network health check.
     """
-    ln_dir = _lightning_dir(node)
 
-    cmd = [
-        "lightning-cli",
-        "--network=regtest",
-        f"--lightning-dir={ln_dir}",
-        *args,
-    ]
+    runtime_dir = os.environ.get("RUNTIME_DIR")
+    lightning_base = os.environ.get("LIGHTNING_BASE")
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return json.loads(proc.stdout)
-
-    except subprocess.CalledProcessError as e:
+    if not runtime_dir or not lightning_base:
         return {
-            "error": "lightning_cli_failed",
-            "stderr": e.stderr.strip(),
-            "stdout": e.stdout.strip(),
-            "node": node,
-            "args": args,
+            "status": "error",
+            "reason": "environment_not_loaded",
         }
 
-    except json.JSONDecodeError:
-        return {
-            "error": "invalid_json_from_lightning",
-            "node": node,
-            "args": args,
-        }
-
-
-def _run_network_test() -> Dict[str, Any]:
-    """
-    Wrap network_test.sh as structured health endpoint.
-    """
-    script = PROJECT_ROOT / "scripts" / "network_test.sh"
-
-    try:
-        proc = subprocess.run(
-            [str(script), "2"],  # adjust node count if needed later
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        return {
-            "healthy": proc.returncode == 0,
-            "exit_code": proc.returncode,
-            "stdout": proc.stdout.strip(),
-            "stderr": proc.stderr.strip(),
-        }
-
-    except Exception as e:
-        return {
-            "healthy": False,
-            "exit_code": -1,
-            "error": str(e),
-        }
+    return {
+        "status": "ok",
+        "runtime_dir": runtime_dir,
+        "lightning_base": lightning_base,
+    }
 
 
 ###############################################################################
-# MCP TOOLS (READ-ONLY)
+# JSON-RPC LOOP
 ###############################################################################
 
-@mcp.tool()
-def network_health() -> Dict[str, Any]:
-    """
-    Authoritative network health check via network_test.sh.
-    """
-    return _run_network_test()
 
+def _run() -> None:
+    """
+    Deterministic stdin/stdout JSON RPC loop.
+    """
 
-@mcp.tool()
-def ln_getinfo(node: int = 1) -> Dict[str, Any]:
-    """
-    Read-only: Return Core Lightning getinfo for specific node.
-    """
-    return _run_lightning_cli(node, ["getinfo"])
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
 
+        try:
+            request = json.loads(line)
+            method = request.get("method")
+            req_id = request.get("id")
 
-@mcp.tool()
-def ln_listfunds(node: int = 1) -> Dict[str, Any]:
-    """
-    Read-only: Return wallet + channel funds for specific node.
-    """
-    return _run_lightning_cli(node, ["listfunds"])
+            if method == "network_health":
+                result = _handle_network_health()
+            else:
+                result = {"error": f"unknown_method: {method}"}
 
+            response = {
+                "id": req_id,
+                "result": result,
+            }
 
-@mcp.tool()
-def ln_decodepay(node: int, bolt11: str) -> Dict[str, Any]:
-    """
-    Read-only: Decode invoice (uses node context for consistency).
-    """
-    return _run_lightning_cli(node, ["decodepay", bolt11])
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+
+        except Exception as e:
+            error_response = {
+                "id": None,
+                "error": str(e),
+            }
+            sys.stdout.write(json.dumps(error_response) + "\n")
+            sys.stdout.flush()
 
 
 ###############################################################################
-# Server Entrypoint
+# ENTRYPOINT
 ###############################################################################
+
 
 if __name__ == "__main__":
-    mcp.run()
+    _load_env()
+    _run()
