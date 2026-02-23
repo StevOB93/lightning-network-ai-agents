@@ -2,31 +2,23 @@
 
 set -euo pipefail
 
+###############################################################################
+# PATH RESOLUTION
+###############################################################################
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 NODE_COUNT="${1:-2}"
-RESET_MODE="${2:-}"
 
 echo "=================================================="
-echo "LN-AI FULL SYSTEM SHUTDOWN"
+echo "LN-AI SYSTEM SHUTDOWN"
 echo "=================================================="
 
-###############################################################################
-# AGENT
-###############################################################################
-
-./scripts/shutdown/1.agent_shutdown.sh
-
-###############################################################################
-# CONTROL PLANE
-###############################################################################
-
-./scripts/shutdown/2.control_plane_shutdown.sh
-
-###############################################################################
-# INFRA
-###############################################################################
-
-./scripts/shutdown/3.infra_shutdown.sh "$NODE_COUNT" "$RESET_MODE"
+"$PROJECT_ROOT/scripts/shutdown/1.agent_shutdown.sh"
+"$PROJECT_ROOT/scripts/shutdown/2.control_plane_shutdown.sh"
+"$PROJECT_ROOT/scripts/shutdown/3.infra_shutdown.sh" "$NODE_COUNT"
 
 echo "=================================================="
-echo "SYSTEM SHUTDOWN COMPLETE"
+echo "SYSTEM STOPPED"
 echo "=================================================="
