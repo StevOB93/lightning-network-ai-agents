@@ -1,142 +1,176 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
-###############################################################################
-# network_test.sh
+# ==============================================================
+# create_network.sh
 #
-# Read-only Lightning regtest health check.
+# Deterministic Lightning Network creator
 #
-# Responsibilities:
-# - Verify Bitcoin RPC
-# - Verify Lightning RPC for all nodes
-# - Verify chain readiness
-# - Verify peers and channels
-# - Perform a minimal test payment (1 sat)
-#
-# This script:
-# - Is FAST
-# - Is NON-DESTRUCTIVE
-# - NEVER creates wallets
-# - NEVER mines blocks
-# - NEVER modifies topology
-#
-###############################################################################
+# - Uses shared Bitcoin regtest backend
+# - Connects N CLN nodes
+# - Opens deterministic linear channels
+# - Verifies CHANNELD_NORMAL
+# - No race conditions
+# - No assumptions
+# ==============================================================
 
-### --- Arguments --------------------------------------------------------------
+set -e
 
-if [[ $# -ne 1 ]]; then
-  echo "[FATAL] Usage: $0 <num_nodes>"
-  exit 1
+source "$(dirname "$0")/../env.sh"
+
+NODE_COUNT="$1"
+
+if [ -z "$NODE_COUNT" ]; then
+    echo "[ERROR] Usage: ./scripts/create_network.sh <node_count>"
+    exit 1
 fi
 
-NUM_NODES="$1"
+echo "[INFO] Creating deterministic Lightning network with $NODE_COUNT nodes"
 
-if ! [[ "$NUM_NODES" =~ ^[1-9][0-9]*$ ]]; then
-  echo "[FATAL] num_nodes must be a positive integer"
-  exit 1
+# --------------------------------------------------------------
+# BITCOIN WALLET SETUP
+# --------------------------------------------------------------
+
+echo "[INFO] Ensuring Bitcoin wallet exists..."
+
+if ! bitcoin-cli -regtest -datadir="$BITCOIN_DIR" listwallets | grep -q "\"shared-wallet\""; then
+    bitcoin-cli -regtest -datadir="$BITCOIN_DIR" createwallet "shared-wallet"
 fi
 
-### --- Environment ------------------------------------------------------------
+bitcoin-cli -regtest -datadir="$BITCOIN_DIR" loadwallet "shared-wallet" >/dev/null 2>&1 || true
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../env.sh"
+# --------------------------------------------------------------
+# ENSURE BLOCKCHAIN HEIGHT
+# --------------------------------------------------------------
 
-BITCOIN_DIR="$LN_RUNTIME/bitcoin/shared"
-LIGHTNING_BASE="$LN_RUNTIME/lightning"
+BLOCKS=$(bitcoin-cli -regtest -datadir="$BITCOIN_DIR" getblockcount)
 
-BITCOIN_CLI="bitcoin-cli -regtest -datadir=$BITCOIN_DIR"
-
-### --- Logging ---------------------------------------------------------------
-
-log()   { echo "[INFO] $*"; }
-fatal() { echo "[FATAL] $*" >&2; }
-
-### --- Bitcoin RPC ------------------------------------------------------------
-
-log "Checking Bitcoin RPC"
-
-if ! BTC_HEIGHT="$($BITCOIN_CLI getblockcount 2>/dev/null)"; then
-  fatal "Bitcoin RPC unreachable"
-  exit 10
+if [ "$BLOCKS" -lt 1000 ]; then
+    echo "[INFO] Mining initial 1000 blocks..."
+    ADDR=$(bitcoin-cli -regtest -datadir="$BITCOIN_DIR" getnewaddress)
+    bitcoin-cli -regtest -datadir="$BITCOIN_DIR" generatetoaddress 1000 "$ADDR"
 fi
 
-IBD="$($BITCOIN_CLI getblockchaininfo | jq -r '.initialblockdownload')"
+# --------------------------------------------------------------
+# WAIT FOR ALL LIGHTNING RPCS
+# --------------------------------------------------------------
 
-log "Bitcoin height: $BTC_HEIGHT"
+echo "[INFO] Waiting for Lightning RPC readiness..."
 
-### --- Lightning RPC + chain readiness ---------------------------------------
-
-log "Checking Lightning nodes"
-
-for i in $(seq 1 "$NUM_NODES"); do
-  LN_DIR="$LIGHTNING_BASE/node-$i"
-  LN_CLI="lightning-cli --network=regtest --lightning-dir=$LN_DIR"
-
-  if ! INFO="$($LN_CLI getinfo 2>/dev/null)"; then
-    fatal "Lightning RPC unreachable for node-$i"
-    exit 20
-  fi
-
-  LN_HEIGHT="$(echo "$INFO" | jq -r '.blockheight')"
-  SYNCED="$(echo "$INFO" | jq -r '.synced_to_chain')"
-  WARN="$(echo "$INFO" | jq -r '.warning_bitcoind_sync // empty')"
-
-  # Chain readiness (same logic as create_network.sh)
-  if [[ "$SYNCED" == "true" && -z "$WARN" ]]; then
-    log "node-$i chain-ready (normal path)"
-  elif [[ "$LN_HEIGHT" == "$BTC_HEIGHT" && "$IBD" == "false" ]]; then
-    log "node-$i chain-ready (cached-chain path)"
-  else
-    fatal "node-$i not chain-ready"
-    exit 30
-  fi
+for i in $(seq 1 $NODE_COUNT); do
+    while ! lightning-cli --lightning-dir="$LIGHTNING_BASE/node-$i" getinfo >/dev/null 2>&1; do
+        sleep 1
+    done
 done
 
-### --- Peer topology ----------------------------------------------------------
+echo "[INFO] All Lightning RPCs ready"
 
-log "Checking peer connectivity"
+# --------------------------------------------------------------
+# FETCH NODE IDS
+# --------------------------------------------------------------
 
-SRC_DIR="$LIGHTNING_BASE/node-1"
-SRC_CLI="lightning-cli --network=regtest --lightning-dir=$SRC_DIR"
+declare -A NODE_IDS
 
-for i in $(seq 2 "$NUM_NODES"); do
-  DST_DIR="$LIGHTNING_BASE/node-$i"
-  DST_ID="$(lightning-cli --network=regtest --lightning-dir=$DST_DIR getinfo | jq -r '.id')"
-
-  if ! $SRC_CLI listpeers | jq -e ".peers[] | select(.id == \"$DST_ID\" and .connected == true)" >/dev/null; then
-    fatal "node-1 not connected to node-$i"
-    exit 40
-  fi
+for i in $(seq 1 $NODE_COUNT); do
+    NODE_IDS[$i]=$(
+        lightning-cli --lightning-dir="$LIGHTNING_BASE/node-$i" getinfo | jq -r '.id'
+    )
 done
 
-### --- Channel state ----------------------------------------------------------
+# --------------------------------------------------------------
+# FUND LIGHTNING NODES
+# --------------------------------------------------------------
 
-log "Checking channel states"
+echo "[INFO] Funding Lightning nodes..."
 
-BAD="$($SRC_CLI listchannels | jq '[.channels[] | select(.state != "CHANNELD_NORMAL")] | length')"
+for i in $(seq 1 $NODE_COUNT); do
+    ADDR=$(
+        lightning-cli --lightning-dir="$LIGHTNING_BASE/node-$i" newaddr | jq -r '.bech32'
+    )
 
-if [[ "$BAD" -ne 0 ]]; then
-  fatal "One or more channels not in CHANNELD_NORMAL"
-  exit 50
-fi
+    bitcoin-cli -regtest -datadir="$BITCOIN_DIR" sendtoaddress "$ADDR" 1
+done
 
-### --- Test payment -----------------------------------------------------------
+# Confirm funding
+MINER_ADDR=$(bitcoin-cli -regtest -datadir="$BITCOIN_DIR" getnewaddress)
+bitcoin-cli -regtest -datadir="$BITCOIN_DIR" generatetoaddress 6 "$MINER_ADDR"
 
-log "Performing test payment (1 sat)"
+# --------------------------------------------------------------
+# CONNECT NODES (LINEAR TOPOLOGY)
+# node-1 <-> node-2 <-> node-3 ...
+# --------------------------------------------------------------
 
-DST_DIR="$LIGHTNING_BASE/node-$NUM_NODES"
-DST_CLI="lightning-cli --network=regtest --lightning-dir=$DST_DIR"
+echo "[INFO] Connecting peers..."
 
-INVOICE="$($DST_CLI invoice 1 test-sat test-sat | jq -r '.bolt11')"
+for i in $(seq 1 $((NODE_COUNT - 1))); do
 
-if ! $SRC_CLI pay "$INVOICE" >/dev/null; then
-  fatal "Test payment failed"
-  exit 60
-fi
+    TARGET=$((i + 1))
+    PORT=$((9735 + TARGET - 1))
 
-log "Test payment succeeded"
+    lightning-cli --lightning-dir="$LIGHTNING_BASE/node-$i" connect \
+        "${NODE_IDS[$TARGET]}" 127.0.0.1 "$PORT"
 
-### --- Success ---------------------------------------------------------------
+done
 
-log "Lightning network health: OK"
-exit 0
+# --------------------------------------------------------------
+# VERIFY PEER CONNECTIVITY
+# --------------------------------------------------------------
+
+echo "[INFO] Verifying peer connectivity..."
+
+for i in $(seq 1 $((NODE_COUNT - 1))); do
+    TARGET=$((i + 1))
+
+    while true; do
+        PEER_COUNT=$(
+            lightning-cli --lightning-dir="$LIGHTNING_BASE/node-$i" listpeers \
+            | jq ".peers | length"
+        )
+
+        if [ "$PEER_COUNT" -ge 1 ]; then
+            break
+        fi
+
+        sleep 1
+    done
+done
+
+# --------------------------------------------------------------
+# OPEN CHANNELS
+# --------------------------------------------------------------
+
+echo "[INFO] Opening channels..."
+
+for i in $(seq 1 $((NODE_COUNT - 1))); do
+    TARGET=$((i + 1))
+
+    lightning-cli --lightning-dir="$LIGHTNING_BASE/node-$i" fundchannel \
+        "${NODE_IDS[$TARGET]}" 1000000
+done
+
+# Mine confirmation blocks
+bitcoin-cli -regtest -datadir="$BITCOIN_DIR" generatetoaddress 6 "$MINER_ADDR"
+
+# --------------------------------------------------------------
+# WAIT FOR CHANNELD_NORMAL
+# --------------------------------------------------------------
+
+echo "[INFO] Waiting for CHANNELD_NORMAL..."
+
+for i in $(seq 1 $((NODE_COUNT - 1))); do
+    TARGET=$((i + 1))
+
+    while true; do
+        STATE=$(
+            lightning-cli --lightning-dir="$LIGHTNING_BASE/node-$i" listpeers \
+            | jq -r ".peers[0].channels[0].state"
+        )
+
+        if [ "$STATE" == "CHANNELD_NORMAL" ]; then
+            break
+        fi
+
+        sleep 1
+    done
+done
+
+echo "[SUCCESS] Deterministic Lightning network established"

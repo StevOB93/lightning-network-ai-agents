@@ -1,6 +1,33 @@
 from __future__ import annotations
 
 import json
+from typing import Any, Dict, List
+
+from mcp.client.fastmcp import FastMCPClient
+
+MCP_NAME = "ln-tools"
+
+
+def build_observations(node_count: int) -> Dict[str, Any]:
+    """
+    Query MCP for network health and per-node balances.
+    """
+
+    client = FastMCPClient(MCP_NAME)
+
+    try:
+        # Network health
+        health = client.call("network_health")
+
+        observations: List[Dict[str, Any]] = []
+
+        # Per-node funds
+        for n in range(1, node_count + 1):
+            lf = client.call("ln_listfunds", node=n)
+            observations.append({
+                "node": n,
+                "funds": lf
+            })
 import os
 from typing import Any, Dict, List, Tuple
 
@@ -93,6 +120,21 @@ def choose_intent(
                 "reason": f"Address liquidity failures (insufficient_liquidity={liq})"
             }
 
+        return {
+            "health": health,
+            "observations": observations
+        }
+
+    finally:
+        client.close()
+
+
+def decide_intent(observations: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Simple deterministic intent logic.
+    """
+
+    if "error" in observations.get("health", {}):
     return {
         "intent": "noop",
         "reason": "Network healthy or insufficient evidence to propose action"
@@ -106,11 +148,30 @@ def run_agent(fixture_path: str, node_count: int) -> Dict[str, Any]:
     if not ok:
         return {
             "intent": "noop",
-            "reason": f"Cannot read network_health: {health.get('error')}",
-            "confidence": 0.2,
-            "evidence": {"health": {"error": health.get("error")}, "observations": ["tool_failure(network_health)"]}
+            "reason": "Network health unavailable",
+            "confidence": 0.1,
+            "evidence": observations
         }
 
+    return {
+        "intent": "observe_only",
+        "reason": "Network operational",
+        "confidence": 0.9,
+        "evidence": observations
+    }
+
+
+def main():
+    try:
+        node_count = 2  # For now deterministic; can parameterize later
+
+        observations = build_observations(node_count)
+        intent = decide_intent(observations)
+
+        print(json.dumps(intent, indent=2))
+
+    except Exception as e:
+        print(json.dumps({
     funds_by_node: Dict[int, Dict[str, Any]] = {}
     for n in range(1, node_count + 1):
         ok, lf = _safe_tool_call(client, "ln_listfunds", {"node": n})

@@ -1,29 +1,43 @@
 #!/usr/bin/env bash
 
-############################################
-# Project root (MUST match actual repo)
-############################################
+# ==============================================================
+# env.sh
+#
+# Deterministic environment configuration
+# Absolute paths derived from this file's location
+# No reliance on pwd
+# ==============================================================
 
-export LN_ROOT="$HOME/lightning-network-ai-agents/ln-ai-network"
+set -e
 
-############################################
-# Derived paths
-############################################
+# Get absolute path of project root (parent of this file)
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-export LN_RUNTIME="$LN_ROOT/runtime"
-export LN_LOGS="$LN_ROOT/logs"
-export LN_SCRIPTS="$LN_ROOT/scripts"
+# --------------------------------------------------------------
+# Runtime directories
+# --------------------------------------------------------------
 
-############################################
-# Bitcoin Core
-############################################
+export RUNTIME_DIR="$PROJECT_ROOT/runtime"
 
-export BITCOIND="/usr/local/bin/bitcoind"
-export BITCOIN_CLI="/usr/local/bin/bitcoin-cli"
+export BITCOIN_DIR="$RUNTIME_DIR/bitcoin/shared"
 
-############################################
-# Core Lightning
-############################################
+export LIGHTNING_BASE="$RUNTIME_DIR/lightning"
 
-export LIGHTNINGD="/usr/local/bin/lightningd"
-export LIGHTNING_CLI="/usr/local/bin/lightning-cli"
+# --------------------------------------------------------------
+# Deterministic ports
+# --------------------------------------------------------------
+
+export BITCOIN_RPC_PORT=18443
+export BITCOIN_P2P_PORT=18444
+
+export LIGHTNING_BASE_PORT=9735
+
+# --------------------------------------------------------------
+# Regtest only enforcement
+# --------------------------------------------------------------
+
+export NETWORK="regtest"
+
+export LN_RUNTIME="$RUNTIME_DIR"
+
+
