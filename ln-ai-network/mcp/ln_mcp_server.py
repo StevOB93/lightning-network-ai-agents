@@ -5,17 +5,17 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 # =============================================================================
-# Deterministic path/env helpers
+# Deterministic config
 # =============================================================================
 
 def _repo_root() -> Path:
-    # mcp/ln_mcp_server.py -> mcp -> repo root
     return Path(__file__).resolve().parents[1]
 
 
@@ -40,7 +40,7 @@ class RuntimeConfig:
     bitcoin_rpc_port: int
     bitcoin_rpc_user: str
     bitcoin_rpc_password: str
-    network: str  # regtest only
+    network: str
     cmd_timeout_s: int
 
 
@@ -50,7 +50,6 @@ def load_config() -> RuntimeConfig:
     bitcoin_dir = Path(_env("BITCOIN_DIR", str(runtime_dir / "bitcoin" / "shared")))
     lightning_base = Path(_env("LIGHTNING_BASE", str(runtime_dir / "lightning")))
 
-    # Defaults match what your bitcoind/lightningd processes are currently using
     return RuntimeConfig(
         repo_root=root,
         runtime_dir=runtime_dir,
@@ -60,19 +59,15 @@ def load_config() -> RuntimeConfig:
         bitcoin_rpc_user=_env("BITCOIN_RPC_USER", "lnrpc"),
         bitcoin_rpc_password=_env("BITCOIN_RPC_PASSWORD", "lnrpcpass"),
         network=_env("NETWORK", "regtest"),
-        cmd_timeout_s=_env_int("MCP_CMD_TIMEOUT_S", 8),
+        cmd_timeout_s=_env_int("MCP_CMD_TIMEOUT_S", 10),
     )
 
 
 # =============================================================================
-# Safe subprocess helpers (no shell, deterministic parsing)
+# Subprocess helpers (no shell, deterministic)
 # =============================================================================
 
-def _run_json_cmd(argv: List[str], timeout_s: int) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Runs a command expected to output JSON to stdout.
-    Returns (ok, payload). On failure payload includes an 'error' string.
-    """
+def _run_cmd(argv: List[str], timeout_s: int) -> Tuple[int, str, str]:
     try:
         cp = subprocess.run(
             argv,
@@ -82,101 +77,188 @@ def _run_json_cmd(argv: List[str], timeout_s: int) -> Tuple[bool, Dict[str, Any]
             check=False,
             text=True,
         )
+        return cp.returncode, (cp.stdout or "").strip(), (cp.stderr or "").strip()
     except FileNotFoundError:
-        return False, {"error": f"Command not found: {argv[0]}"}
+        return 127, "", f"Command not found: {argv[0]}"
     except subprocess.TimeoutExpired:
-        return False, {"error": f"Timeout after {timeout_s}s: {' '.join(argv)}"}
+        return 124, "", f"Timeout after {timeout_s}s: {' '.join(argv)}"
     except Exception as e:
-        return False, {"error": f"Exec error: {e.__class__.__name__}: {e}"}
+        return 125, "", f"Exec error: {e.__class__.__name__}: {e}"
 
-    if cp.returncode != 0:
-        err = (cp.stderr or cp.stdout or "").strip()
-        return False, {"error": f"Non-zero exit ({cp.returncode}): {err}"}
 
-    out = (cp.stdout or "").strip()
-    if not out:
-        return False, {"error": "Empty stdout (expected JSON)"}
-
+def _run_json(argv: List[str], timeout_s: int) -> Dict[str, Any]:
+    rc, out, err = _run_cmd(argv, timeout_s)
+    if rc != 0:
+        return {"ok": False, "error": f"Non-zero exit ({rc}): {err or out}", "argv": argv}
+    if out == "":
+        return {"ok": False, "error": "Empty stdout (expected JSON)", "argv": argv}
     try:
         obj = json.loads(out)
-        if isinstance(obj, dict):
-            return True, obj
-        return True, {"_raw": obj}
+        return {"ok": True, "payload": obj}
     except Exception:
-        # If JSON parse fails, return raw output for debugging
-        return False, {"error": "Invalid JSON output", "stdout": out[:2000]}
+        return {"ok": False, "error": "Invalid JSON output", "stdout": out[:2000], "argv": argv}
 
+
+def _run_text(argv: List[str], timeout_s: int) -> Dict[str, Any]:
+    rc, out, err = _run_cmd(argv, timeout_s)
+    if rc != 0:
+        return {"ok": False, "error": f"Non-zero exit ({rc}): {err or out}", "argv": argv}
+    return {"ok": True, "payload": out}
+
+
+# =============================================================================
+# CLN node directory resolution
+# =============================================================================
 
 def _list_node_dirs(lightning_base: Path) -> List[Path]:
     if not lightning_base.exists():
         return []
+
     nodes = [p for p in lightning_base.iterdir() if p.is_dir() and p.name.startswith("node-")]
-    # Deterministic ordering by numeric suffix if possible
+
     def key(p: Path) -> Tuple[int, str]:
         try:
             return (int(p.name.split("-", 1)[1]), p.name)
         except Exception:
             return (10**9, p.name)
+
     return sorted(nodes, key=key)
 
 
+def _node_dir(cfg: RuntimeConfig, node: Union[int, str]) -> Path:
+    # node can be 1 or "node-1"
+    if isinstance(node, int):
+        name = f"node-{node}"
+    else:
+        node_s = str(node)
+        name = node_s if node_s.startswith("node-") else f"node-{node_s}"
+    return cfg.lightning_base / name
+
+
+def _require_node_dir(cfg: RuntimeConfig, node: Union[int, str]) -> Path:
+    nd = _node_dir(cfg, node)
+    if not nd.exists():
+        raise ValueError(f"Node dir does not exist: {nd}")
+    return nd
+
+
 # =============================================================================
-# Tool handlers
+# Bitcoin helpers
 # =============================================================================
 
-def _handle_bitcoin_health(cfg: RuntimeConfig) -> Dict[str, Any]:
-    argv = [
+def _btc_base(cfg: RuntimeConfig) -> List[str]:
+    return [
         "bitcoin-cli",
         f"-{cfg.network}",
         f"-datadir={str(cfg.bitcoin_dir)}",
         f"-rpcport={cfg.bitcoin_rpc_port}",
         f"-rpcuser={cfg.bitcoin_rpc_user}",
         f"-rpcpassword={cfg.bitcoin_rpc_password}",
-        "getblockchaininfo",
     ]
-    ok, payload = _run_json_cmd(argv, cfg.cmd_timeout_s)
-    return {"ok": ok, "payload": payload}
 
 
-def _handle_cln_getinfo(cfg: RuntimeConfig, node_dir: Path) -> Dict[str, Any]:
-    # IMPORTANT: must pass --network=regtest or lightning-cli will default to 'bitcoin'
-    argv = [
+def btc_getblockchaininfo() -> Dict[str, Any]:
+    cfg = load_config()
+    return _run_json(_btc_base(cfg) + ["getblockchaininfo"], cfg.cmd_timeout_s)
+
+
+def btc_sendtoaddress(address: str, amount_btc: str) -> Dict[str, Any]:
+    cfg = load_config()
+    # sendtoaddress returns a txid (text), not JSON
+    return _run_text(_btc_base(cfg) + ["sendtoaddress", address, str(amount_btc)], cfg.cmd_timeout_s)
+
+
+def btc_generatetoaddress(blocks: int, address: str) -> Dict[str, Any]:
+    cfg = load_config()
+    # generatetoaddress returns JSON array of block hashes
+    return _run_json(_btc_base(cfg) + ["generatetoaddress", str(int(blocks)), address], cfg.cmd_timeout_s)
+
+
+# =============================================================================
+# Lightning helpers
+# =============================================================================
+
+def _ln_base(cfg: RuntimeConfig, node_dir: Path) -> List[str]:
+    # IMPORTANT: must pass --network=regtest or lightning-cli defaults to "bitcoin"
+    return [
         "lightning-cli",
         f"--network={cfg.network}",
         f"--lightning-dir={str(node_dir)}",
-        "getinfo",
     ]
-    ok, payload = _run_json_cmd(argv, cfg.cmd_timeout_s)
-    return {"ok": ok, "payload": payload}
 
 
-def _handle_cln_listpeers(cfg: RuntimeConfig, node_dir: Path) -> Dict[str, Any]:
-    argv = [
-        "lightning-cli",
-        f"--network={cfg.network}",
-        f"--lightning-dir={str(node_dir)}",
-        "listpeers",
-    ]
-    ok, payload = _run_json_cmd(argv, cfg.cmd_timeout_s)
-    return {"ok": ok, "payload": payload}
+def ln_getinfo(node: Union[int, str]) -> Dict[str, Any]:
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    return _run_json(_ln_base(cfg, nd) + ["getinfo"], cfg.cmd_timeout_s)
 
 
-def _handle_cln_listfunds(cfg: RuntimeConfig, node_dir: Path) -> Dict[str, Any]:
-    argv = [
-        "lightning-cli",
-        f"--network={cfg.network}",
-        f"--lightning-dir={str(node_dir)}",
-        "listfunds",
-    ]
-    ok, payload = _run_json_cmd(argv, cfg.cmd_timeout_s)
-    return {"ok": ok, "payload": payload}
+def ln_listpeers(node: Union[int, str]) -> Dict[str, Any]:
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    return _run_json(_ln_base(cfg, nd) + ["listpeers"], cfg.cmd_timeout_s)
 
 
-def _handle_network_health() -> Dict[str, Any]:
+def ln_listfunds(node: Union[int, str]) -> Dict[str, Any]:
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    return _run_json(_ln_base(cfg, nd) + ["listfunds"], cfg.cmd_timeout_s)
+
+
+def ln_listchannels(node: Union[int, str]) -> Dict[str, Any]:
     """
-    MCP tool: network_health
-    Returns a deterministic structured health object.
+    In CLN, 'listchannels' is global gossip.
+    For local channel state, listpeerchannels is usually what you want.
+    We'll map ln_listchannels -> listpeerchannels with no args (lists all peer channels).
     """
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    return _run_json(_ln_base(cfg, nd) + ["listpeerchannels"], cfg.cmd_timeout_s)
+
+
+def ln_newaddr(node: Union[int, str]) -> Dict[str, Any]:
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    return _run_json(_ln_base(cfg, nd) + ["newaddr"], cfg.cmd_timeout_s)
+
+
+def ln_connect(from_node: Union[int, str], peer_id: str, host: str, port: int) -> Dict[str, Any]:
+    cfg = load_config()
+    nd = _require_node_dir(cfg, from_node)
+    target = f"{peer_id}@{host}:{int(port)}"
+    return _run_json(_ln_base(cfg, nd) + ["connect", target], cfg.cmd_timeout_s)
+
+
+def ln_openchannel(from_node: Union[int, str], peer_id: str, amount_sat: int) -> Dict[str, Any]:
+    """
+    Maps to CLN 'fundchannel <id> <amount_sat>'.
+    """
+    cfg = load_config()
+    nd = _require_node_dir(cfg, from_node)
+    return _run_json(_ln_base(cfg, nd) + ["fundchannel", peer_id, str(int(amount_sat))], cfg.cmd_timeout_s)
+
+
+def ln_invoice(node: Union[int, str], amount_msat: Optional[int], label: str, description: str) -> Dict[str, Any]:
+    """
+    CLN: invoice <msatoshi|any> <label> <description>
+    """
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    amt = "any" if amount_msat is None else str(int(amount_msat))
+    return _run_json(_ln_base(cfg, nd) + ["invoice", amt, label, description], cfg.cmd_timeout_s)
+
+
+def ln_pay(from_node: Union[int, str], bolt11: str) -> Dict[str, Any]:
+    cfg = load_config()
+    nd = _require_node_dir(cfg, from_node)
+    return _run_json(_ln_base(cfg, nd) + ["pay", bolt11], cfg.cmd_timeout_s)
+
+
+# =============================================================================
+# network_health (informative, deterministic)
+# =============================================================================
+
+def network_health() -> Dict[str, Any]:
     cfg = load_config()
 
     result: Dict[str, Any] = {
@@ -191,65 +273,75 @@ def _handle_network_health() -> Dict[str, Any]:
         "warnings": [],
     }
 
-    # --- Bitcoin health ---
-    btc = _handle_bitcoin_health(cfg)
+    btc = btc_getblockchaininfo()
     result["bitcoin"] = btc
     bitcoin_ok = bool(btc.get("ok"))
 
-    # --- CLN nodes ---
     node_dirs = _list_node_dirs(cfg.lightning_base)
-    nodes_out: List[Dict[str, Any]] = []
     ok_nodes = 0
+    nodes_out: List[Dict[str, Any]] = []
+    warnings: List[str] = []
 
     for nd in node_dirs:
-        node_entry: Dict[str, Any] = {
-            "name": nd.name,
-            "lightning_dir": str(nd),
-            "getinfo": {},
-            "peers": {},
-            "funds": {},
-        }
-
-        gi = _handle_cln_getinfo(cfg, nd)
-        node_entry["getinfo"] = gi
+        name = nd.name
+        gi = ln_getinfo(name)
+        peers = {"ok": False, "error": "skipped"}
+        funds = {"ok": False, "error": "skipped"}
+        ch = {"ok": False, "error": "skipped"}
 
         if gi.get("ok"):
             ok_nodes += 1
+            peers = ln_listpeers(name)
+            funds = ln_listfunds(name)
+            ch = ln_listchannels(name)
 
-            # Optional: these can be slower; still deterministic
-            node_entry["peers"] = _handle_cln_listpeers(cfg, nd)
-            node_entry["funds"] = _handle_cln_listfunds(cfg, nd)
+            payload = gi.get("payload", {})
+            if isinstance(payload, dict):
+                for k, v in payload.items():
+                    if isinstance(k, str) and k.startswith("warning_"):
+                        warnings.append(f"{name} {k}: {v}")
 
-        nodes_out.append(node_entry)
+        nodes_out.append(
+            {
+                "name": name,
+                "lightning_dir": str(nd),
+                "getinfo": gi,
+                "peers": peers,
+                "funds": funds,
+                "channels": ch,
+            }
+        )
 
     result["nodes"] = nodes_out
-
-    # --- Overall status determination (deterministic) ---
     total_nodes = len(node_dirs)
+
+    # Overall status logic
     if bitcoin_ok and total_nodes > 0 and ok_nodes == total_nodes:
         result["status"] = "ok"
     elif bitcoin_ok and ok_nodes > 0:
         result["status"] = "degraded"
-        result["warnings"].append("Some nodes are not responding to lightning-cli getinfo")
+        warnings.append("Some nodes are not responding to getinfo")
     elif bitcoin_ok and total_nodes == 0:
         result["status"] = "degraded"
-        result["warnings"].append("No node-* directories found under lightning_base")
+        warnings.append("No node-* dirs found under lightning_base")
     else:
         result["status"] = "down"
         if not bitcoin_ok:
-            result["warnings"].append("bitcoind not responding to bitcoin-cli getblockchaininfo")
+            warnings.append("bitcoind not responding")
 
+    result["warnings"] = warnings
     result["summary"] = {
         "bitcoin_ok": bitcoin_ok,
         "nodes_total": total_nodes,
         "nodes_ok": ok_nodes,
+        "warnings_count": len(warnings),
     }
 
     return result
 
 
 # =============================================================================
-# Minimal JSON-RPC style dispatcher (compatible with your existing calls)
+# Dispatcher (method -> handler)
 # =============================================================================
 
 def _error(msg: str) -> Dict[str, Any]:
@@ -257,22 +349,55 @@ def _error(msg: str) -> Dict[str, Any]:
 
 
 def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    In-process handler. Params are currently unused for network_health.
-    """
-    _ = params or {}
-    if method == "network_health":
-        return _handle_network_health()
-    return _error(f"Unknown method '{method}'")
+    params = params or {}
+
+    try:
+        if method == "network_health":
+            return network_health()
+
+        # Bitcoin
+        if method == "btc_getblockchaininfo":
+            return btc_getblockchaininfo()
+        if method == "btc_sendtoaddress":
+            return btc_sendtoaddress(str(params["address"]), str(params["amount_btc"]))
+        if method == "btc_generatetoaddress":
+            return btc_generatetoaddress(int(params["blocks"]), str(params["address"]))
+
+        # Lightning (read-only)
+        if method == "ln_getinfo":
+            return ln_getinfo(params["node"])
+        if method == "ln_listpeers":
+            return ln_listpeers(params["node"])
+        if method == "ln_listfunds":
+            return ln_listfunds(params["node"])
+        if method == "ln_listchannels":
+            return ln_listchannels(params["node"])
+        if method == "ln_newaddr":
+            return ln_newaddr(params["node"])
+
+        # Lightning (actions)
+        if method == "ln_connect":
+            return ln_connect(params["from_node"], str(params["peer_id"]), str(params["host"]), int(params["port"]))
+        if method == "ln_openchannel":
+            return ln_openchannel(params["from_node"], str(params["peer_id"]), int(params["amount_sat"]))
+        if method == "ln_invoice":
+            amt = params.get("amount_msat", None)
+            amt_i = None if amt is None else int(amt)
+            return ln_invoice(params["node"], amt_i, str(params["label"]), str(params["description"]))
+        if method == "ln_pay":
+            return ln_pay(params["from_node"], str(params["bolt11"]))
+
+        return _error(f"Unknown method '{method}'")
+
+    except KeyError as e:
+        return _error(f"Missing required param: {e}")
+    except ValueError as e:
+        return _error(str(e))
+    except Exception as e:
+        return _error(f"Unhandled error: {e.__class__.__name__}: {e}")
 
 
 def handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Accepts requests like:
-      {"id": 1, "method": "network_health", "params": {...}}
-    Returns:
-      {"id": 1, "result": {...}} OR {"id": 1, "error": "..."}
-    """
     rid = req.get("id", 0)
     method = req.get("method")
     params = req.get("params") or {}
@@ -280,18 +405,13 @@ def handle_request(req: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(method, str):
         return {"id": rid, "error": "Invalid request: missing 'method' string"}
 
-    result = handle(method, params)
-    # Match your observed client behavior: include id + result
-    if "error" in result and len(result.keys()) == 1:
-        return {"id": rid, "error": result["error"]}
-    return {"id": rid, "result": result}
+    res = handle(method, params)
+    if "error" in res and len(res.keys()) == 1:
+        return {"id": rid, "error": res["error"]}
+    return {"id": rid, "result": res}
 
 
 def main() -> None:
-    """
-    STDIN/STDOUT JSON lines server.
-    Reads one JSON request per line, writes one JSON response per line.
-    """
     for line in sys.stdin:
         line = line.strip()
         if not line:
