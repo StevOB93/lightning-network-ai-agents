@@ -24,6 +24,8 @@ export LIGHTNING_BASE_PORT="${LIGHTNING_BASE_PORT:-9735}"
 # Regtest only
 export NETWORK="${NETWORK:-regtest}"
 export LN_RUNTIME="$RUNTIME_DIR"
+export BITCOIN_RPC_USER="${BITCOIN_RPC_USER:-lnrpc}"
+export BITCOIN_RPC_PASSWORD="${BITCOIN_RPC_PASSWORD:-lnrpcpass}"
 
 # Safety check: prevent running with placeholder key
 if [[ "${LLM_PROVIDER:-}" == "openai" ]]; then

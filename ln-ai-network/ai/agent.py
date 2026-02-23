@@ -3,253 +3,445 @@ from __future__ import annotations
 import json
 import time
 import traceback
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
-from ai.core.backoff import DeterministicBackoff
-from ai.core.config import AgentConfig
-from ai.core.concurrency import ConcurrencyGate
-from ai.core.rate_limiter import DualRateLimiter
-from ai.core.scheduler import DeterministicScheduler
-from ai.core.token_estimation import HeuristicTokenEstimator
-from ai.llm.base import (
-    AuthError,
-    LLMRequest,
-    PermanentAPIError,
-    RateLimitError,
-    TransientAPIError,
-)
+from ai.command_queue import read_new, write_outbox
 from ai.llm.factory import create_backend
-from ai.mcp_client import FastMCPClientWrapper, MCPClient
 from mcp.client.fastmcp import FastMCPClient
+
+
+def _now_monotonic() -> float:
+    import time as _t
+    return _t.monotonic()
+
+
+def _short_id(node_id: str, n: int = 12) -> str:
+    if not isinstance(node_id, str) or not node_id:
+        return "unknown"
+    return node_id[:n]
+
+
+def _trunc(s: Any, width: int) -> str:
+    txt = "" if s is None else str(s)
+    if width <= 0:
+        return ""
+    if len(txt) <= width:
+        return txt.ljust(width)
+    # Deterministic truncation
+    if width <= 1:
+        return txt[:width]
+    return (txt[: width - 1] + "…")
+
+
+def _extract_port(binding: Any) -> Optional[int]:
+    # binding is typically a list of {"type","address","port"}
+    if isinstance(binding, list):
+        for b in binding:
+            if isinstance(b, dict) and "port" in b:
+                try:
+                    return int(b["port"])
+                except Exception:
+                    continue
+    return None
+
+
+def _collect_node_warnings(getinfo_payload: Dict[str, Any]) -> List[str]:
+    warns: List[str] = []
+    for k, v in getinfo_payload.items():
+        if isinstance(k, str) and k.startswith("warning_"):
+            warns.append(f"{k}: {v}")
+    return warns
+
+
+def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
 
 class LightningAgent:
     """
-    Production-oriented deterministic control loop:
-
-    Tick -> (Backoff Gate) -> (RateLimit Gate RPM/TPM/min-interval) -> (Concurrency Gate)
-         -> LLM step (provider-agnostic) -> MCP tool execution (ONLY boundary) -> state update
-
-    One LLM request per tick at most.
+    Persistent AI controller:
+    - waits for user commands (runtime/agent/inbox.jsonl)
+    - HEALTH CHECK: MCP-only + deterministic formatter (NO LLM = cheap)
+    - FREEFORM: may use LLM + MCP tools (only when you explicitly ask)
     """
 
     def __init__(self) -> None:
-        self.cfg = AgentConfig.from_env()
-
-        # MCP boundary (only executor)
-        self.mcp: MCPClient = FastMCPClientWrapper(FastMCPClient())
-
-        # Provider backend (swappable via factory)
+        self.mcp = FastMCPClient()
         self.backend = create_backend()
 
-        # Token estimator (backend may provide a better one)
-        self.token_estimator = self.backend.token_estimator() or HeuristicTokenEstimator()
+        # Deterministic cadence
+        self.tick_s = 0.5
 
-        # Control plane
-        self.scheduler = DeterministicScheduler(self.cfg.tick_ms)
-        self.limiter = DualRateLimiter(
-            rpm=self.cfg.llm_rpm,
-            tpm=self.cfg.llm_tpm,
-            min_interval_ms=self.cfg.llm_min_interval_ms,
-        )
-        self.backoff = DeterministicBackoff(
-            base_ms=self.cfg.backoff_base_ms,
-            max_ms=self.cfg.backoff_max_ms,
-            jitter_ms=self.cfg.backoff_jitter_ms,
-            circuit_breaker_after=self.cfg.circuit_breaker_after,
-            circuit_breaker_open_ms=self.cfg.circuit_breaker_open_ms,
-        )
-        self.llm_gate = ConcurrencyGate(self.cfg.llm_max_in_flight)
+        # Minimum spacing between LLM calls (only used for freeform)
+        self.min_llm_interval_s = 1.0
+        self._next_llm_time = _now_monotonic()
 
-        # Conversation state
-        self.messages: List[Dict[str, Any]] = [
+        # Safety cap for tool-call loops per request (freeform only)
+        self.max_steps_per_command = 6
+
+    def _log(self, kind: str, payload: Dict[str, Any]) -> None:
+        out = {"ts": int(time.time()), "kind": kind, **payload}
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+
+    def _sleep_to_next_tick(self, start_t: float) -> None:
+        elapsed = _now_monotonic() - start_t
+        remain = max(0.0, self.tick_s - elapsed)
+        time.sleep(remain)
+
+    def _llm_allowed(self) -> bool:
+        return _now_monotonic() >= self._next_llm_time
+
+    def _reserve_llm(self) -> None:
+        self._next_llm_time = max(self._next_llm_time, _now_monotonic() + self.min_llm_interval_s)
+
+    def _write_report(self, req_id: int, content: str, extra: Optional[Dict[str, Any]] = None) -> None:
+        entry: Dict[str, Any] = {
+            "ts": int(time.time()),
+            "type": "agent_report",
+            "request_id": req_id,
+            "content": content,
+        }
+        if extra:
+            entry.update(extra)
+        write_outbox(entry)
+
+    # ---------------------------
+    # Health reporting (NO LLM)
+    # ---------------------------
+
+    def _format_health_report(self, raw: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """
+        raw may be:
+          {"id": X, "result": {...}}  (your MCP server pattern)
+        or already the inner result dict.
+        Returns (pretty_text, compact_summary_dict).
+        """
+        inner = raw.get("result") if isinstance(raw, dict) and "result" in raw else raw
+        if not isinstance(inner, dict):
+            return ("Health check failed: invalid response shape", {"status": "down"})
+
+        status = str(inner.get("status", "unknown")).lower()
+        network = inner.get("network", "regtest")
+
+        # Bitcoin
+        btc_ok = bool(_safe_get(inner, "bitcoin", "ok", default=False))
+        btc_payload = _safe_get(inner, "bitcoin", "payload", default={})
+        blocks = _safe_get(btc_payload, "blocks", default=None)
+        headers = _safe_get(btc_payload, "headers", default=None)
+        ibd = _safe_get(btc_payload, "initialblockdownload", default=None)
+        btc_warn = _safe_get(btc_payload, "warnings", default="")
+
+        # Nodes
+        nodes = inner.get("nodes", [])
+        if not isinstance(nodes, list):
+            nodes = []
+
+        total_nodes = _safe_get(inner, "summary", "nodes_total", default=len(nodes))
+        ok_nodes = _safe_get(inner, "summary", "nodes_ok", default=0)
+
+        # Aggregates for quick glance
+        total_peers = 0
+        total_active_ch = 0
+        total_utxos = 0
+        total_funded_ch = 0
+
+        warnings: List[str] = []
+
+        # Build node table rows
+        rows: List[Dict[str, Any]] = []
+
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+
+            name = n.get("name", "node-?")
+            gi_ok = bool(_safe_get(n, "getinfo", "ok", default=False))
+            gi = _safe_get(n, "getinfo", "payload", default={}) if gi_ok else {}
+
+            alias = gi.get("alias", "UNKNOWN") if isinstance(gi, dict) else "UNKNOWN"
+            node_id = gi.get("id", "") if isinstance(gi, dict) else ""
+            height = gi.get("blockheight", None) if isinstance(gi, dict) else None
+            port = _extract_port(gi.get("binding")) if isinstance(gi, dict) else None
+
+            peers_count = None
+            if gi_ok and isinstance(gi, dict) and "num_peers" in gi:
+                try:
+                    peers_count = int(gi["num_peers"])
+                except Exception:
+                    peers_count = None
+
+            active_ch = None
+            if gi_ok and isinstance(gi, dict) and "num_active_channels" in gi:
+                try:
+                    active_ch = int(gi["num_active_channels"])
+                except Exception:
+                    active_ch = None
+
+            # Funds summary
+            funds_ok = bool(_safe_get(n, "funds", "ok", default=False))
+            funds_payload = _safe_get(n, "funds", "payload", default={}) if funds_ok else {}
+            outputs_n = len(funds_payload.get("outputs", [])) if isinstance(funds_payload, dict) else 0
+            chans_n = len(funds_payload.get("channels", [])) if isinstance(funds_payload, dict) else 0
+
+            # Aggregate totals
+            total_peers += int(peers_count or 0)
+            total_active_ch += int(active_ch or 0)
+            total_utxos += int(outputs_n)
+            total_funded_ch += int(chans_n)
+
+            # Collect node warnings from getinfo payload
+            node_warns: List[str] = []
+            if gi_ok and isinstance(gi, dict):
+                node_warns = _collect_node_warnings(gi)
+                for w in node_warns:
+                    warnings.append(f"{name} {w}")
+
+            rows.append(
+                {
+                    "name": str(name),
+                    "ok": gi_ok,
+                    "alias": str(alias),
+                    "id_short": _short_id(str(node_id)),
+                    "port": port,
+                    "height": height,
+                    "peers": peers_count,
+                    "active_ch": active_ch,
+                    "utxos": outputs_n,
+                    "funded_ch": chans_n,
+                    "warn_count": len(node_warns),
+                }
+            )
+
+        # Bitcoin warnings
+        if isinstance(btc_warn, str) and btc_warn.strip():
+            warnings.append(f"bitcoin warnings: {btc_warn.strip()}")
+
+        # ---- Build at-a-glance report ----
+        status_word = status.upper()
+
+        # Big summary lines (glanceable)
+        line1 = f"STATUS: {status_word}   NET: {network}"
+        btc_state = "OK" if btc_ok else "DOWN"
+        line2 = f"BITCOIN: {btc_state}   blocks={blocks} headers={headers} IBD={ibd}"
+        line3 = f"NODES: {ok_nodes}/{total_nodes} OK   peers={total_peers}   active_ch={total_active_ch}   utxos={total_utxos}   funded_ch={total_funded_ch}"
+
+        # Warnings at top (so you don't miss them)
+        pretty: List[str] = []
+        pretty.append(line1)
+        pretty.append(line2)
+        pretty.append(line3)
+
+        if warnings:
+            pretty.append("")
+            pretty.append(f"WARNINGS ({len(warnings)}):")
+            # keep deterministic order: already built in node iteration order
+            for w in warnings:
+                pretty.append(f" - {w}")
+
+        # Node table
+        pretty.append("")
+        pretty.append("NODES:")
+        header = (
+            f"{_trunc('NODE', 8)} "
+            f"{_trunc('STATUS', 6)} "
+            f"{_trunc('ALIAS', 16)} "
+            f"{_trunc('ID', 12)} "
+            f"{_trunc('PORT', 5)} "
+            f"{_trunc('HEIGHT', 6)} "
+            f"{_trunc('PEERS', 5)} "
+            f"{_trunc('CH', 3)} "
+            f"{_trunc('UTXO', 4)} "
+            f"{_trunc('FCH', 3)} "
+            f"{_trunc('W', 1)}"
+        )
+        pretty.append(header)
+        pretty.append("-" * len(header))
+
+        if not rows:
+            pretty.append("(no nodes detected)")
+        else:
+            for r in rows:
+                st = "OK" if r["ok"] else "DOWN"
+                port = "" if r["port"] is None else str(r["port"])
+                height = "" if r["height"] is None else str(r["height"])
+                peers = "" if r["peers"] is None else str(r["peers"])
+                ch = "" if r["active_ch"] is None else str(r["active_ch"])
+                utxo = str(r["utxos"])
+                fch = str(r["funded_ch"])
+                wflag = "!" if int(r["warn_count"]) > 0 else ""
+
+                pretty.append(
+                    f"{_trunc(r['name'], 8)} "
+                    f"{_trunc(st, 6)} "
+                    f"{_trunc(r['alias'], 16)} "
+                    f"{_trunc(r['id_short'], 12)} "
+                    f"{_trunc(port, 5)} "
+                    f"{_trunc(height, 6)} "
+                    f"{_trunc(peers, 5)} "
+                    f"{_trunc(ch, 3)} "
+                    f"{_trunc(utxo, 4)} "
+                    f"{_trunc(fch, 3)} "
+                    f"{_trunc(wflag, 1)}"
+                )
+
+        # Helpful (deterministic) “next actions” hints for common states
+        next_actions: List[str] = []
+        if total_nodes and total_peers == 0:
+            next_actions.append("Connect nodes (no peers).")
+        if total_nodes and total_utxos == 0 and total_funded_ch == 0:
+            next_actions.append("Fund node wallets (no UTXOs/channels).")
+        if total_nodes and total_funded_ch == 0 and total_utxos > 0:
+            next_actions.append("Open channels (funded wallets but no channels).")
+
+        if next_actions:
+            pretty.append("")
+            pretty.append("NEXT ACTIONS:")
+            for a in next_actions:
+                pretty.append(f" - {a}")
+
+        summary = {
+            "status": status,
+            "network": network,
+            "bitcoin_ok": btc_ok,
+            "blocks": blocks,
+            "headers": headers,
+            "ibd": ibd,
+            "nodes_total": total_nodes,
+            "nodes_ok": ok_nodes,
+            "peers_total": total_peers,
+            "active_channels_total": total_active_ch,
+            "utxos_total": total_utxos,
+            "funded_channels_total": total_funded_ch,
+            "warnings_count": len(warnings),
+        }
+
+        return ("\n".join(pretty), summary)
+
+    def _handle_health_check(self, req: Dict[str, Any]) -> None:
+        req_id = int(req.get("id", 0))
+        meta = req.get("meta") or {}
+        include_raw = bool(meta.get("include_raw", False))
+
+        self._log("health_check_start", {"request_id": req_id})
+
+        raw = self.mcp.call("network_health")
+        pretty, summary = self._format_health_report(raw)
+
+        extra: Dict[str, Any] = {"summary": summary}
+        if include_raw:
+            extra["raw"] = raw  # optional debug (still no LLM)
+
+        self._write_report(req_id, pretty, extra=extra)
+        self._log("health_check_done", {"request_id": req_id, **summary})
+
+    # ---------------------------
+    # Freeform (may use LLM)
+    # ---------------------------
+
+    def _handle_freeform(self, req: Dict[str, Any]) -> None:
+        """
+        Freeform path: may use LLM + MCP tools.
+        Only runs when you explicitly enqueue via `ai.cli ask "..."`
+        """
+        req_id = int(req.get("id", 0))
+        user_text = str(req.get("content", ""))
+
+        self._log("freeform_start", {"request_id": req_id})
+
+        messages: List[Dict[str, Any]] = [
             {
                 "role": "system",
                 "content": (
-                    "You are an autonomous Lightning Network agent.\n"
+                    "You are a Lightning Network (regtest) controller.\n"
                     "Rules:\n"
-                    "- You MUST only act using the provided tools.\n"
-                    "- You MUST NOT assume access outside the tools.\n"
+                    "- You MUST only act using MCP tools.\n"
                     "- You MUST NOT call Lightning RPC directly.\n"
-                    "- All execution is through MCP tools only.\n"
-                    "- If uncertain, ask for clarification or remain idle.\n"
+                    "- You MUST NOT bypass MCP.\n"
                 ),
-            }
+            },
+            {"role": "user", "content": user_text},
         ]
 
-        self._step_id = 0
-
-    def get_tools(self) -> List[Dict[str, Any]]:
-        # Keep this deterministic. Expand later from intents.schema.json if desired.
-        return [
+        tools = [
             {
                 "type": "function",
                 "function": {
                     "name": "network_health",
-                    "description": "Check health of Lightning network.",
+                    "description": "Check health of Bitcoin+Lightning regtest network.",
                     "parameters": {"type": "object", "properties": {}},
                 },
             }
         ]
 
-    def _trim_history(self) -> None:
-        """
-        Deterministic cap to prevent TPM runaway.
-        Keep the first system message + last N-1 messages.
-        """
-        cap = max(2, int(self.cfg.max_history_messages))
-        if len(self.messages) <= cap:
+        steps = 0
+        while steps < self.max_steps_per_command:
+            steps += 1
+
+            if not self._llm_allowed():
+                time.sleep(0.1)
+                continue
+
+            self._reserve_llm()
+
+            resp = self.backend.step(messages, tools)
+
+            if resp["type"] == "tool_call":
+                tool_name = resp["tool_name"]
+                tool_args = resp["tool_args"] or {}
+
+                result = self.mcp.call(tool_name, **tool_args)
+
+                messages.append({"role": "assistant", "content": resp.get("reasoning") or ""})
+                messages.append({"role": "tool", "name": tool_name, "content": json.dumps(result, ensure_ascii=False)})
+                continue
+
+            content = resp.get("content") or ""
+            messages.append({"role": "assistant", "content": content})
+            self._write_report(req_id, content, extra={"steps": steps})
+            self._log("freeform_done", {"request_id": req_id, "steps": steps})
             return
-        system = self.messages[0:1]
-        tail = self.messages[-(cap - 1):]
-        self.messages = system + tail
 
-    def _compact_tool_result(self, result: Any) -> str:
-        """
-        Deterministic tool output compaction to prevent huge tool payloads.
-        """
-        s = json.dumps(result, ensure_ascii=False)
-        limit = int(self.cfg.max_tool_output_chars)
-        if limit <= 0 or len(s) <= limit:
-            return s
+        self._write_report(req_id, "ERROR: exceeded max steps for this request.", extra={"steps": steps})
+        self._log("freeform_max_steps", {"request_id": req_id, "steps": steps})
 
-        head_len = max(0, limit // 2)
-        tail_len = max(0, limit - head_len)
-
-        compact = {
-            "_truncated": True,
-            "original_len": len(s),
-            "head": s[:head_len],
-            "tail": s[-tail_len:] if tail_len > 0 else "",
-        }
-        return json.dumps(compact, ensure_ascii=False)
-
-    def _print_event(self, kind: str, payload: Dict[str, Any]) -> None:
-        # Deterministic structured logging.
-        out = {"ts": int(time.time()), "kind": kind, **payload}
-        print(json.dumps(out, ensure_ascii=False))
+    # ---------------------------
+    # Main loop
+    # ---------------------------
 
     def run(self) -> None:
-        self._print_event("agent_start", {"msg": "Persistent deterministic control loop started."})
+        self._log("agent_start", {"msg": "Agent online. Waiting for runtime/agent/inbox.jsonl"})
 
         while True:
-            self.scheduler.wait_next_tick()
-            self._step_id += 1
-
+            tick_start = _now_monotonic()
             try:
-                # Backoff gate
-                if self.backoff.blocked():
-                    self._print_event("blocked_backoff", {"step": self._step_id})
+                new_msgs = read_new()
+                if not new_msgs:
+                    self._sleep_to_next_tick(tick_start)
                     continue
 
-                tools = self.get_tools()
+                for msg in new_msgs:
+                    meta = msg.get("meta") or {}
+                    kind = meta.get("kind")
 
-                # Estimate tokens for gating
-                est_prompt = self.token_estimator.estimate_prompt_tokens(self.messages, tools)
-                est_total = est_prompt + int(self.cfg.llm_max_output_tokens)
+                    if kind == "health_check":
+                        self._handle_health_check(msg)
+                    else:
+                        self._handle_freeform(msg)
 
-                # Rate limit gate
-                if not self.limiter.allowed(est_total):
-                    self._print_event("blocked_ratelimit", {"step": self._step_id, "est_total_tokens": est_total})
-                    continue
-
-                # Concurrency gate (non-blocking; deterministic)
-                if not self.llm_gate.acquire(blocking=False):
-                    self._print_event("blocked_concurrency", {"step": self._step_id})
-                    continue
-
-                try:
-                    # Reserve budget before the call (prevents burst spikes)
-                    self.limiter.spend(est_total)
-
-                    req = LLMRequest(
-                        messages=self.messages,
-                        tools=tools,
-                        max_output_tokens=self.cfg.llm_max_output_tokens,
-                        temperature=self.cfg.llm_temperature,
-                    )
-
-                    resp = self.backend.step(req)
-
-                finally:
-                    self.llm_gate.release()
-
-                # If we got usage, reconcile token bucket
-                if resp.usage is not None:
-                    self.limiter.reconcile_actual(
-                        actual_total_tokens=resp.usage.total_tokens,
-                        estimated_total_tokens=est_total,
-                    )
-
-                # Success resets backoff
-                self.backoff.note_success()
-
-                if resp.type == "tool_call":
-                    # Append assistant "reasoning" (if any)
-                    self.messages.append({"role": "assistant", "content": resp.reasoning or ""})
-
-                    # Execute ALL tool calls via MCP, deterministically in order
-                    for tc in resp.tool_calls:
-                        result = self.mcp.call(tc.name, tc.args)
-
-                        self.messages.append(
-                            {
-                                "role": "tool",
-                                "name": tc.name,
-                                "content": self._compact_tool_result(result),
-                            }
-                        )
-
-                    self._trim_history()
-
-                    self._print_event(
-                        "llm_tool_call",
-                        {
-                            "step": self._step_id,
-                            "tools": [{"name": t.name, "args": t.args} for t in resp.tool_calls],
-                            "usage": resp.usage.__dict__ if resp.usage else None,
-                        },
-                    )
-
-                else:
-                    self.messages.append({"role": "assistant", "content": resp.content or ""})
-                    self._trim_history()
-
-                    self._print_event(
-                        "llm_final",
-                        {
-                            "step": self._step_id,
-                            "content": resp.content,
-                            "usage": resp.usage.__dict__ if resp.usage else None,
-                        },
-                    )
+                self._sleep_to_next_tick(tick_start)
 
             except KeyboardInterrupt:
-                self._print_event("agent_stop", {"msg": "Shutdown requested."})
+                self._log("agent_stop", {"msg": "Shutdown requested."})
                 break
-
-            except RateLimitError as e:
-                self._print_event("llm_rate_limited", {"step": self._step_id, "retry_after_s": e.retry_after_s})
-                self.backoff.note_failure(self._step_id, retry_after_s=e.retry_after_s)
-
-            except TransientAPIError as e:
-                self._print_event("llm_transient_error", {"step": self._step_id, "error": str(e)})
-                self.backoff.note_failure(self._step_id)
-
-            except PermanentAPIError as e:
-                # Treat as "stop making requests" to avoid flooding a bad schema/config.
-                self._print_event("llm_permanent_error", {"step": self._step_id, "error": str(e)})
-                self.backoff.note_failure(self._step_id, retry_after_s=60.0)
-
-            except AuthError as e:
-                # Auth errors should not be retried quickly.
-                self._print_event("llm_auth_error", {"step": self._step_id, "error": str(e)})
-                self.backoff.note_failure(self._step_id, retry_after_s=300.0)
-
             except Exception:
-                self._print_event("agent_unhandled_exception", {"step": self._step_id})
+                self._log("agent_error", {})
                 traceback.print_exc()
-                self.backoff.note_failure(self._step_id)
+                self._sleep_to_next_tick(tick_start)
 
 
 if __name__ == "__main__":
