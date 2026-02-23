@@ -15,12 +15,12 @@ A runnable research harness for **AI agents that can communicate (A2A), use tool
 - **Agents** that decide, call tools, and pay when required
 
 ## Start here
-- **Quickstart:** [Run the demo in minutes](quickstart/)
-- **Setup:** [Install and configure the environment](setup/)
-- **Architecture:** [How the system is connected](architecture/)
-- **Components:** [A2A, MCP, x402, Lightning, Agents](components/)
-- **Runbooks:** [Start/stop, troubleshooting, demos](runbooks/)
-- **Roadmap:** [What we’re building next](roadmap/)
+- **Quickstart:** [Run the demo in minutes](0.Quickstart/)
+- **Setup:** [Install and configure the environment](1.Setup/)
+- **Architecture:** [How the system is connected](2.Architecture/)
+- **Components:** [A2A, MCP, x402, Lightning, Agents](3.Components/)
+- **Runbooks:** [Start/stop, troubleshooting, demos](4.Runbooks/)
+- **Roadmap:** [What we’re building next](5.Roadmap/)
 
 ## Repo layout (high level)
 - `docs/` — this website documentation
