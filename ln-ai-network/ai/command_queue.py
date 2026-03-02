@@ -107,12 +107,26 @@ def read_new() -> List[Dict[str, Any]]:
     """
     Agent-side: read new inbox entries since last offset (byte offset).
     Deterministic across restarts.
+
+    IMPORTANT: if inbox.jsonl was truncated (e.g., cleared), the stored offset can
+    point past EOF. In that case, reset offset to 0 so the agent can read again.
     """
     qp = ensure()
     try:
         offset = int(qp.offset.read_text(encoding="utf-8").strip() or "0")
     except Exception:
         offset = 0
+
+    # --- self-heal: inbox truncated while offset persisted ---
+    try:
+        inbox_size = qp.inbox.stat().st_size
+    except Exception:
+        inbox_size = 0
+
+    if offset > inbox_size:
+        offset = 0
+        qp.offset.write_text("0", encoding="utf-8")
+    # --------------------------------------------------------
 
     with qp.inbox.open("rb") as f:
         f.seek(offset)
