@@ -2,7 +2,6 @@ import json
 import os
 from typing import List, Dict, Any
 
-from openai import OpenAI
 from ai.llm.base import LLMBackend
 
 
@@ -23,25 +22,61 @@ def _parse_args(raw: Any) -> Dict[str, Any]:
 class OpenAIBackend(LLMBackend):
 
     def __init__(self) -> None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY not set")
+        try:
+            from openai import OpenAI
+        except ImportError as e:
+            raise RuntimeError(
+                "The 'openai' Python package is not installed. Run 'pip install -r requirements.txt'."
+            ) from e
 
-        self.client = OpenAI(api_key=api_key)
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+
+        if provider == "gemini":
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise RuntimeError("GEMINI_API_KEY not set")
+
+            base_url = os.getenv(
+                "GEMINI_BASE_URL",
+                "https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
+            model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+            timeout_s = float(os.getenv("GEMINI_TIMEOUT_S", "60"))
+        else:
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise RuntimeError("OPENAI_API_KEY not set")
+
+            base_url = os.getenv("OPENAI_BASE_URL")
+            model = os.getenv("OPENAI_MODEL", "gpt-4o")
+            timeout_s = float(os.getenv("OPENAI_TIMEOUT_S", "60"))
+
+        client_kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": timeout_s,
+        }
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self.client = OpenAI(**client_kwargs)
+        self.model = model
 
     def step(
         self,
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        request: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+        }
+        if tools:
+            request["tools"] = tools
+            # Gemini's OpenAI-compatible function calling examples specify tool_choice.
+            request["tool_choice"] = "auto"
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            temperature=0.2,
-        )
+        response = self.client.chat.completions.create(**request)
 
         choice = response.choices[0]
 

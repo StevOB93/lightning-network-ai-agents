@@ -28,7 +28,13 @@ export BITCOIN_RPC_USER="${BITCOIN_RPC_USER:-lnrpc}"
 export BITCOIN_RPC_PASSWORD="${BITCOIN_RPC_PASSWORD:-lnrpcpass}"
 
 # Safety check: prevent running with placeholder key
-if [[ "${LLM_PROVIDER:-}" == "openai" ]]; then
+if [[ "${LLM_PROVIDER:-}" == "gemini" ]]; then
+  if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+    echo "[env.sh] ERROR: GEMINI_API_KEY not set. Create .env from .env.example and set it." >&2
+  elif [[ "${GEMINI_API_KEY}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
+    echo "[env.sh] ERROR: GEMINI_API_KEY still placeholder. Set a real key in your local .env." >&2
+  fi
+elif [[ "${LLM_PROVIDER:-}" == "openai" ]]; then
   if [[ -z "${OPENAI_API_KEY:-}" ]]; then
     echo "[env.sh] ERROR: OPENAI_API_KEY not set. Create .env from .env.example and set it." >&2
   elif [[ "${OPENAI_API_KEY}" == "__REPLACE_WITH_REAL_KEY__" ]]; then

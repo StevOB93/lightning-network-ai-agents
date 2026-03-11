@@ -45,7 +45,12 @@ class StartupLock:
                 fh.seek(0)
                 existing = fh.read().strip()
                 if existing:
-                    raise RuntimeError(existing)
+                    pid = _extract_pid(existing)
+                    if pid is not None and not _pid_is_running(pid):
+                        fh.seek(0)
+                        fh.truncate()
+                    else:
+                        raise RuntimeError(existing)
             else:
                 try:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -104,6 +109,26 @@ class StartupLock:
 
 def _now_monotonic() -> float:
     return time.monotonic()
+
+
+def _extract_pid(lock_text: str) -> Optional[int]:
+    for token in lock_text.split():
+        if token.startswith("pid="):
+            try:
+                return int(token.split("=", 1)[1])
+            except Exception:
+                return None
+    return None
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -212,12 +237,12 @@ class LightningAgent:
         self._lock.acquire_or_exit()
 
         self.mcp = FastMCPClient()
-        self.backend = create_backend()
 
         self.tick_s = 0.5
 
         # LLM gating (deliberate spend)
         self.allow_llm = _env_bool("ALLOW_LLM", default=False)
+        self.backend = create_backend() if self.allow_llm else None
         self.min_llm_interval_s = 1.0
         self._next_llm_time = _now_monotonic()
         self.max_steps_per_command = 12
@@ -475,9 +500,94 @@ class LightningAgent:
             {"type": "function", "function": {"name": "ln_pay", "description": "Pay invoice.", "parameters": {"type": "object", "properties": {"from_node": {"type": "integer"}, "bolt11": {"type": "string"}}, "required": ["from_node", "bolt11"]}}},
         ]
 
+    def _llm_callable_tools(self, tool_calls_made: List[str]) -> List[Any]:
+        def network_health() -> dict[str, Any]:
+            """Check regtest Bitcoin and Lightning network health."""
+            tool_calls_made.append("network_health")
+            return self.mcp.call("network_health")
+
+        def btc_getblockchaininfo() -> dict[str, Any]:
+            """Get regtest blockchain status."""
+            tool_calls_made.append("btc_getblockchaininfo")
+            return self.mcp.call("btc_getblockchaininfo")
+
+        def btc_sendtoaddress(address: str, amount_btc: str) -> dict[str, Any]:
+            """Send BTC on regtest to an address."""
+            tool_calls_made.append("btc_sendtoaddress")
+            return self.mcp.call("btc_sendtoaddress", address=address, amount_btc=amount_btc)
+
+        def btc_generatetoaddress(blocks: int, address: str) -> dict[str, Any]:
+            """Mine regtest blocks to an address."""
+            tool_calls_made.append("btc_generatetoaddress")
+            return self.mcp.call("btc_generatetoaddress", blocks=blocks, address=address)
+
+        def ln_getinfo(node: int) -> dict[str, Any]:
+            """Get Core Lightning node info."""
+            tool_calls_made.append("ln_getinfo")
+            return self.mcp.call("ln_getinfo", node=node)
+
+        def ln_listpeers(node: int) -> dict[str, Any]:
+            """List peers for a Core Lightning node."""
+            tool_calls_made.append("ln_listpeers")
+            return self.mcp.call("ln_listpeers", node=node)
+
+        def ln_listfunds(node: int) -> dict[str, Any]:
+            """List funds and channels for a Core Lightning node."""
+            tool_calls_made.append("ln_listfunds")
+            return self.mcp.call("ln_listfunds", node=node)
+
+        def ln_listchannels(node: int) -> dict[str, Any]:
+            """List local peer channels for a Core Lightning node."""
+            tool_calls_made.append("ln_listchannels")
+            return self.mcp.call("ln_listchannels", node=node)
+
+        def ln_newaddr(node: int) -> dict[str, Any]:
+            """Create a new on-chain address for a Core Lightning node."""
+            tool_calls_made.append("ln_newaddr")
+            return self.mcp.call("ln_newaddr", node=node)
+
+        def ln_connect(from_node: int, peer_id: str, host: str, port: int) -> dict[str, Any]:
+            """Connect a Core Lightning node to a peer."""
+            tool_calls_made.append("ln_connect")
+            return self.mcp.call("ln_connect", from_node=from_node, peer_id=peer_id, host=host, port=port)
+
+        def ln_openchannel(from_node: int, peer_id: str, amount_sat: int) -> dict[str, Any]:
+            """Open a Lightning channel from one node to a peer."""
+            tool_calls_made.append("ln_openchannel")
+            return self.mcp.call("ln_openchannel", from_node=from_node, peer_id=peer_id, amount_sat=amount_sat)
+
+        def ln_invoice(node: int, amount_msat: int | None, label: str, description: str) -> dict[str, Any]:
+            """Create a Lightning invoice."""
+            tool_calls_made.append("ln_invoice")
+            return self.mcp.call("ln_invoice", node=node, amount_msat=amount_msat, label=label, description=description)
+
+        def ln_pay(from_node: int, bolt11: str) -> dict[str, Any]:
+            """Pay a Lightning invoice."""
+            tool_calls_made.append("ln_pay")
+            return self.mcp.call("ln_pay", from_node=from_node, bolt11=bolt11)
+
+        return [
+            network_health,
+            btc_getblockchaininfo,
+            btc_sendtoaddress,
+            btc_generatetoaddress,
+            ln_getinfo,
+            ln_listpeers,
+            ln_listfunds,
+            ln_listchannels,
+            ln_newaddr,
+            ln_connect,
+            ln_openchannel,
+            ln_invoice,
+            ln_pay,
+        ]
+
     def _handle_freeform_llm(self, req_id: int, user_text: str) -> None:
         if not self.allow_llm:
             self._write_report(req_id, "LLM is disabled (ALLOW_LLM!=1). Enable it locally to run --llm requests.")
+            return
+        if self.backend is None:
+            self._write_report(req_id, "LLM backend failed to initialize. Check your provider env vars and API key.")
             return
 
         tools = self._llm_tools_full()
@@ -491,6 +601,29 @@ class LightningAgent:
             "- Be concise and step-by-step.\n"
             "- If you need peer_id/host/port, call ln_getinfo(node) and read id + binding.\n"
         )
+
+        if hasattr(self.backend, "run_prompt"):
+            try:
+                if not self._llm_allowed():
+                    time.sleep(0.1)
+                self._reserve_llm()
+                resp = self.backend.run_prompt(
+                    system_prompt=system_prompt,
+                    user_text=user_text,
+                    tool_functions=self._llm_callable_tools(tool_calls_made),
+                )
+            except Exception as e:
+                self._write_report(
+                    req_id,
+                    f"LLM backend error: {e}",
+                    extra={"used_llm": True, "steps": 1, "tool_calls": tool_calls_made},
+                )
+                return
+
+            content = resp.get("content") or json.dumps(resp, ensure_ascii=False)
+            self._write_report(req_id, content, extra={"used_llm": True, "steps": 1, "tool_calls": tool_calls_made})
+            return
+
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
@@ -504,7 +637,15 @@ class LightningAgent:
                 continue
             self._reserve_llm()
 
-            resp = self.backend.step(messages, tools)
+            try:
+                resp = self.backend.step(messages, tools)
+            except Exception as e:
+                self._write_report(
+                    req_id,
+                    f"LLM backend error: {e}",
+                    extra={"used_llm": True, "steps": steps, "tool_calls": tool_calls_made},
+                )
+                return
 
             if resp.get("type") == "tool_call":
                 tool_name = resp.get("tool_name")
