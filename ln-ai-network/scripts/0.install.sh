@@ -2,12 +2,13 @@
 set -euo pipefail
 
 ############################################################
-# LN_AI_Project :: install.sh
+# LN_AI_Project :: 0.install.sh
 # ----------------------------------------------------------
 # Guarantees after success:
 #   - Bitcoin Core installed (official binaries)
 #   - Core Lightning installed (from source)
 #   - All known CLN build dependencies satisfied
+#   - Project venv created + Python deps installed (requirements.txt)
 #   - Baseline runtime directories exist
 #
 # Explicitly NOT done here:
@@ -15,7 +16,7 @@ set -euo pipefail
 ############################################################
 
 echo "=================================================="
-echo " LN_AI_Project :: install.sh"
+echo " LN_AI_Project :: 0.install.sh"
 echo "=================================================="
 
 ############################################################
@@ -27,11 +28,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 echo "[INFO] Project root: $PROJECT_ROOT"
 
 ############################################################
-# Normalize shell scripts (permissions + CRLF)
+# Normalize shell scripts (permissions + CRLF) — scripts only
 ############################################################
-echo "[INFO] Normalizing shell scripts..."
-find "$PROJECT_ROOT" -type f -name "*.sh" -exec chmod +x {} \; || true
-find "$PROJECT_ROOT" -type f -name "*.sh" -exec sed -i 's/\r$//' {} \; || true
+echo "[INFO] Normalizing shell scripts under scripts/ ..."
+find "$PROJECT_ROOT/scripts" -type f -name "*.sh" -exec chmod +x {} \; || true
+find "$PROJECT_ROOT/scripts" -type f -name "*.sh" -exec sed -i 's/\r$//' {} \; || true
 
 ############################################################
 # System update
@@ -83,10 +84,10 @@ else
   cd "$TMP_DIR"
 
   curl -fLO "$BITCOIN_URL"
-  tar -xzf bitcoin-*.tar.gz
+  tar -xzf "bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz"
 
   sudo install -m 0755 -o root -g root \
-    bitcoin-*/bin/* /usr/local/bin/
+    "bitcoin-${BITCOIN_VERSION}/bin/"* /usr/local/bin/
 
   cd /
   rm -rf "$TMP_DIR"
@@ -138,6 +139,30 @@ mkdir -p "$PROJECT_ROOT/logs"
 mkdir -p "$PROJECT_ROOT/temp"
 
 ############################################################
+# Python venv + deps (one-time)
+############################################################
+VENV_DIR="$PROJECT_ROOT/.venv"
+VENV_PY="$VENV_DIR/bin/python"
+
+if [[ ! -d "$VENV_DIR" ]]; then
+  echo "[INFO] Creating Python venv at $VENV_DIR ..."
+  python3 -m venv "$VENV_DIR"
+fi
+
+if [[ ! -x "$VENV_PY" ]]; then
+  echo "[FATAL] venv python not found/executable at $VENV_PY"
+  exit 127
+fi
+
+if [[ -f "$PROJECT_ROOT/requirements.txt" ]]; then
+  echo "[INFO] Installing Python dependencies from requirements.txt ..."
+  "$VENV_PY" -m pip install --quiet --upgrade pip
+  "$VENV_PY" -m pip install --quiet -r "$PROJECT_ROOT/requirements.txt"
+else
+  echo "[WARN] requirements.txt not found at $PROJECT_ROOT/requirements.txt; skipping pip install."
+fi
+
+############################################################
 # WSL stability notes (non-fatal)
 ############################################################
 if grep -qi microsoft /proc/version; then
@@ -152,6 +177,9 @@ fi
 echo "=================================================="
 echo " Install complete ✔"
 echo
-echo " Next step:"
-echo "   ./start.sh x (x for node #)"
+echo " Next steps:"
+echo "   cd $PROJECT_ROOT"
+echo "   ./scripts/1.start.sh 2"
+echo "   ./scripts/network_test.sh"
+echo "   ./scripts/shutdown.sh 2"
 echo "=================================================="

@@ -1,27 +1,58 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
+
+###############################################################################
+# INTERNAL: called by scripts/1.start.sh — do not run directly
+###############################################################################
+if [[ "${LN_AI_INTERNAL_CALL:-0}" != "1" ]]; then
+  echo "[FATAL] This script is internal. Run: ./scripts/1.start.sh"
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-source "$PROJECT_ROOT/env.sh"
+
+if [[ -f "$PROJECT_ROOT/env.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$PROJECT_ROOT/env.sh"
+else
+  echo "[FATAL] env.sh not found at $PROJECT_ROOT/env.sh"
+  exit 1
+fi
 
 NODE_COUNT="${1:?Must specify node count}"
 
+# Validate NODE_COUNT is a positive integer
+if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]] || [[ "$NODE_COUNT" -lt 1 ]]; then
+  echo "[FATAL] NODE_COUNT must be a positive integer. Got: '$NODE_COUNT'"
+  exit 2
+fi
+
+# Deterministic contract
 TARGET_HEIGHT=1200
 WALLET_NAME="shared-wallet"
 
-RPC_USER="lnrpc"
-RPC_PASS="lnrpcpass"
+# MUST match MCP server defaults and other scripts unless overridden via env.sh/.env
+RPC_USER="${BITCOIN_RPC_USER:-lnrpc}"
+RPC_PASS="${BITCOIN_RPC_PASSWORD:-lnrpcpass}"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 echo "=================================================="
 echo "INFRA BOOT"
-echo "Nodes: $NODE_COUNT"
+echo "Nodes (dirs): $NODE_COUNT"
+echo "Node autostart: node-1 only (AI controls the rest)"
 echo "=================================================="
 
 ###############################################################################
-# DIRECTORY STRUCTURE
+# DIRECTORY STRUCTURE (from env.sh)
 ###############################################################################
+: "${RUNTIME_DIR:?env.sh must set RUNTIME_DIR}"
+: "${BITCOIN_DIR:?env.sh must set BITCOIN_DIR}"
+: "${LIGHTNING_BASE:?env.sh must set LIGHTNING_BASE}"
+: "${BITCOIN_RPC_PORT:?env.sh must set BITCOIN_RPC_PORT}"
+: "${BITCOIN_P2P_PORT:?env.sh must set BITCOIN_P2P_PORT}"
+: "${LIGHTNING_BASE_PORT:?env.sh must set LIGHTNING_BASE_PORT}"
 
 mkdir -p "$RUNTIME_DIR"
 mkdir -p "$BITCOIN_DIR"
@@ -30,31 +61,37 @@ mkdir -p "$LIGHTNING_BASE"
 ###############################################################################
 # START BITCOIN
 ###############################################################################
-
 echo "[INFRA] Ensuring bitcoind running..."
 
+if ! have_cmd bitcoin-cli || ! have_cmd bitcoind; then
+  echo "[FATAL] bitcoin-cli/bitcoind not found. Run ./scripts/0.install.sh"
+  exit 127
+fi
+
 if ! bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+  -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+  getblockchaininfo >/dev/null 2>&1; then
+
+  bitcoind \
+    -regtest \
+    -datadir="$BITCOIN_DIR" \
+    -rpcport="$BITCOIN_RPC_PORT" \
+    -rpcbind=127.0.0.1 \
+    -rpcallowip=127.0.0.1 \
+    -rpcuser="$RPC_USER" \
+    -rpcpassword="$RPC_PASS" \
+    -port="$BITCOIN_P2P_PORT" \
+    -fallbackfee=0.0002 \
+    -server=1 \
+    -daemon
+
+  until bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+    -rpcport="$BITCOIN_RPC_PORT" \
     -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-    getblockchaininfo >/dev/null 2>&1; then
-
-    bitcoind \
-        -regtest \
-        -datadir="$BITCOIN_DIR" \
-        -rpcport="$BITCOIN_RPC_PORT" \
-        -rpcbind=127.0.0.1 \
-        -rpcallowip=127.0.0.1 \
-        -rpcuser="$RPC_USER" \
-        -rpcpassword="$RPC_PASS" \
-        -port="$BITCOIN_P2P_PORT" \
-        -fallbackfee=0.0002 \
-        -server=1 \
-        -daemon
-
-    until bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
-        -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-        getblockchaininfo >/dev/null 2>&1; do
-        sleep 1
-    done
+    getblockchaininfo >/dev/null 2>&1; do
+    sleep 1
+  done
 fi
 
 echo "[INFRA] Bitcoin RPC ready."
@@ -62,88 +99,97 @@ echo "[INFRA] Bitcoin RPC ready."
 ###############################################################################
 # WALLET
 ###############################################################################
-
-if ! bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
-    -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-    listwalletdir | jq -e ".wallets[] | select(.name==\"$WALLET_NAME\")" >/dev/null 2>&1; then
-
-    bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
-        -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-        createwallet "$WALLET_NAME"
+if ! have_cmd jq; then
+  echo "[FATAL] jq not found. Install it (apt install -y jq) or run ./scripts/0.install.sh"
+  exit 127
 fi
 
 if ! bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
-    -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-    listwallets | grep -q "\"$WALLET_NAME\""; then
+  -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+  listwalletdir | jq -e ".wallets[] | select(.name==\"$WALLET_NAME\")" >/dev/null 2>&1; then
 
-    bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
-        -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-        loadwallet "$WALLET_NAME"
+  bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+    -rpcport="$BITCOIN_RPC_PORT" \
+    -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+    createwallet "$WALLET_NAME" >/dev/null
+fi
+
+if ! bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+  -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+  listwallets | grep -q "\"$WALLET_NAME\""; then
+
+  bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+    -rpcport="$BITCOIN_RPC_PORT" \
+    -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+    loadwallet "$WALLET_NAME" >/dev/null 2>&1 || true
 fi
 
 ###############################################################################
 # ENSURE BLOCK HEIGHT
 ###############################################################################
+CURRENT_HEIGHT="$(bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+  -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+  getblockcount)"
 
-CURRENT_HEIGHT=$(bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+if [[ "$CURRENT_HEIGHT" -lt "$TARGET_HEIGHT" ]]; then
+  MINE=$((TARGET_HEIGHT - CURRENT_HEIGHT))
+  ADDR="$(bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+    -rpcport="$BITCOIN_RPC_PORT" \
     -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-    getblockcount)
+    -rpcwallet="$WALLET_NAME" getnewaddress)"
 
-if [ "$CURRENT_HEIGHT" -lt "$TARGET_HEIGHT" ]; then
-    MINE=$((TARGET_HEIGHT - CURRENT_HEIGHT))
-    ADDR=$(bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
-        -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-        -rpcwallet="$WALLET_NAME" getnewaddress)
-
-    bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
-        -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-        generatetoaddress "$MINE" "$ADDR"
+  bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
+    -rpcport="$BITCOIN_RPC_PORT" \
+    -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+    generatetoaddress "$MINE" "$ADDR" >/dev/null
 fi
 
 echo "[INFRA] Block height sufficient."
 
 ###############################################################################
-# START LIGHTNING NODES
+# CREATE NODE DIRECTORIES FOR 1..N (AI will start/manage most nodes)
 ###############################################################################
-
+echo "[INFRA] Ensuring node directories exist under $LIGHTNING_BASE ..."
 for i in $(seq 1 "$NODE_COUNT"); do
-
-    NODE_DIR="$LIGHTNING_BASE/node-$i"
-    PORT=$((LIGHTNING_BASE_PORT + i - 1))
-    LOG_FILE="$NODE_DIR/lightningd.log"
-
-    mkdir -p "$NODE_DIR"
-
-    # Clean port collision
-    if ss -lnt | grep -q ":$PORT "; then
-        echo "[INFRA] Cleaning port $PORT..."
-        fuser -k "$PORT"/tcp || true
-        sleep 1
-    fi
-
-    if ! lightning-cli --network=regtest \
-        --lightning-dir="$NODE_DIR" getinfo >/dev/null 2>&1; then
-
-        echo "[INFRA] Starting lightningd node-$i..."
-
-        lightningd \
-            --network=regtest \
-            --lightning-dir="$NODE_DIR" \
-            --addr=127.0.0.1:$PORT \
-            --bitcoin-rpcconnect=127.0.0.1 \
-            --bitcoin-rpcport="$BITCOIN_RPC_PORT" \
-            --bitcoin-rpcuser="$RPC_USER" \
-            --bitcoin-rpcpassword="$RPC_PASS" \
-            --bitcoin-datadir="$BITCOIN_DIR" \
-            --log-file="$LOG_FILE" &
-
-        until lightning-cli --network=regtest \
-            --lightning-dir="$NODE_DIR" getinfo >/dev/null 2>&1; do
-            sleep 1
-        done
-    fi
-
-    echo "[INFRA] node-$i ready."
+  mkdir -p "$LIGHTNING_BASE/node-$i"
 done
 
+###############################################################################
+# START ONLY node-1 (required for control-plane readiness check)
+###############################################################################
+if ! have_cmd lightningd || ! have_cmd lightning-cli; then
+  echo "[FATAL] lightningd/lightning-cli not found. Run ./scripts/0.install.sh"
+  exit 127
+fi
+
+NODE1_DIR="$LIGHTNING_BASE/node-1"
+NODE1_PORT=$((LIGHTNING_BASE_PORT + 1 - 1))
+NODE1_LOG="$NODE1_DIR/lightningd.log"
+
+if ! lightning-cli --network=regtest --lightning-dir="$NODE1_DIR" getinfo >/dev/null 2>&1; then
+  echo "[INFRA] Starting lightningd node-1 (required baseline)..."
+
+  lightningd \
+    --network=regtest \
+    --lightning-dir="$NODE1_DIR" \
+    --addr=127.0.0.1:"$NODE1_PORT" \
+    --bitcoin-rpcconnect=127.0.0.1 \
+    --bitcoin-rpcport="$BITCOIN_RPC_PORT" \
+    --bitcoin-rpcuser="$RPC_USER" \
+    --bitcoin-rpcpassword="$RPC_PASS" \
+    --bitcoin-datadir="$BITCOIN_DIR" \
+    --log-file="$NODE1_LOG" &
+
+  until lightning-cli --network=regtest --lightning-dir="$NODE1_DIR" getinfo >/dev/null 2>&1; do
+    sleep 1
+  done
+fi
+
+echo "[INFRA] node-1 ready."
+
 echo "[INFRA] Infrastructure ready."
+echo "[INFRA] Note: nodes 2..$NODE_COUNT are NOT started here."
+echo "[INFRA] The AI agent should start/stop nodes via MCP tools (ln_node_start/ln_node_stop)."

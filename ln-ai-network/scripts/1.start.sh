@@ -5,7 +5,11 @@ set -euo pipefail
 # LN-AI FULL SYSTEM START (deterministic + logged)
 #
 # Usage:
+#   ./scripts/1.start.sh [NODE_COUNT]
+#
+# Examples:
 #   ./scripts/1.start.sh 2
+#   REINSTALL_PY_DEPS=1 ./scripts/1.start.sh 3
 #
 # Logs:
 #   logs/system/start.log
@@ -14,11 +18,40 @@ set -euo pipefail
 #   logs/system/0.3.agent_boot.log
 ###############################################################################
 
+usage() {
+  cat <<'EOF'
+LN-AI FULL SYSTEM START
+
+Usage:
+  ./scripts/1.start.sh [NODE_COUNT]
+
+Environment:
+  REINSTALL_PY_DEPS=1   Reinstall Python deps (pip install -r requirements.txt)
+
+Notes:
+  - Run from ln-ai-network/ (this script resolves PROJECT_ROOT automatically).
+  - Per-step logs land in: logs/system/
+EOF
+}
+
 # This file lives in: <repo>/scripts/1.start.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
 NODE_COUNT="${1:-2}"
+
+# Validate NODE_COUNT is a positive integer
+if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]] || [[ "$NODE_COUNT" -lt 1 ]]; then
+  echo "[FATAL] NODE_COUNT must be a positive integer. Got: '$NODE_COUNT'"
+  echo
+  usage
+  exit 2
+fi
 
 LOG_DIR="$PROJECT_ROOT/logs/system"
 mkdir -p "$LOG_DIR"
@@ -44,6 +77,13 @@ else
   exit 1
 fi
 
+# Safe provider banner (no secrets)
+echo "[INFO] LLM_PROVIDER=${LLM_PROVIDER:-openai}"
+if [[ "${LLM_PROVIDER:-openai}" == "ollama" ]]; then
+  echo "[INFO] OLLAMA_MODEL=${OLLAMA_MODEL:-}"
+  echo "[INFO] OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}"
+fi
+
 ###############################################################################
 # Python environment bootstrap (use venv python explicitly)
 ###############################################################################
@@ -66,12 +106,37 @@ if [[ ! -x "$VENV_PY" ]]; then
   exit 127
 fi
 
-if [[ -f "$PROJECT_ROOT/requirements.txt" ]]; then
-  echo "[SETUP] Installing dependencies..."
-  "$VENV_PY" -m pip install --quiet --upgrade pip
-  "$VENV_PY" -m pip install --quiet -r "$PROJECT_ROOT/requirements.txt"
+###############################################################################
+# Python deps policy
+# - By default: do NOT reinstall every run
+# - If LLM_PROVIDER=ollama: ensure 'requests' exists (required by ollama adapter)
+###############################################################################
+install_requirements_if_present() {
+  if [[ -f "$PROJECT_ROOT/requirements.txt" ]]; then
+    "$VENV_PY" -m pip install --quiet --upgrade pip
+    "$VENV_PY" -m pip install --quiet -r "$PROJECT_ROOT/requirements.txt"
+    return 0
+  fi
+  return 1
+}
+
+if [[ "${REINSTALL_PY_DEPS:-0}" == "1" ]]; then
+  echo "[SETUP] Reinstalling Python dependencies (REINSTALL_PY_DEPS=1)..."
+  if ! install_requirements_if_present; then
+    echo "[WARN] requirements.txt not found at $PROJECT_ROOT/requirements.txt; skipping."
+  fi
 else
-  echo "[WARN] requirements.txt not found at repo root; skipping pip install."
+  echo "[SETUP] Skipping pip install (set REINSTALL_PY_DEPS=1 to force)."
+
+  if [[ "${LLM_PROVIDER:-openai}" == "ollama" ]]; then
+    if ! "$VENV_PY" -c "import requests" >/dev/null 2>&1; then
+      echo "[SETUP] Missing Python module 'requests' (required for Ollama). Installing..."
+      if ! install_requirements_if_present; then
+        "$VENV_PY" -m pip install --quiet --upgrade pip
+        "$VENV_PY" -m pip install --quiet requests
+      fi
+    fi
+  fi
 fi
 
 ###############################################################################
@@ -101,7 +166,8 @@ run_step() {
   : > "$step_log"
 
   # Run the step with stdout/stderr redirected to a FILE (not a pipe)
-  bash "$step_path" "$@" >"$step_log" 2>&1 &
+  # Mark as internal to prevent accidental direct execution of sub-scripts.
+  LN_AI_INTERNAL_CALL=1 bash "$step_path" "$@" >"$step_log" 2>&1 &
   local step_pid=$!
 
   # Stream the file live while the step runs (no pipe inheritance issues)
@@ -118,6 +184,7 @@ run_step() {
   # Propagate step exit code
   wait "$step_pid"
 }
+
 ###############################################################################
 # Startup sequence
 ###############################################################################
