@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lightning Agent Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Lightning AI Demo</p>
+        <h1>Show the agent thinking with tools, not terminal noise.</h1>
+        <p class="lede">This UI sends the same inbox requests as the CLI, then watches the outbox so a non-technical audience can see what the agent did.</p>
+      </div>
+      <div class="hero-status">
+        <div class="status-card">
+          <span class="status-label">Agent Lock</span>
+          <code id="agent-lock">Checking...</code>
+        </div>
+        <div class="status-card accent">
+          <span class="status-label">Last Request</span>
+          <code id="last-request">None</code>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel controls">
+        <h2>Run a Demo</h2>
+        <p>Use the deterministic health check or the Gemini summary path.</p>
+        <div class="button-row">
+          <button id="health-btn" class="primary">Queue Health Check</button>
+          <button id="refresh-btn" class="secondary">Refresh Status</button>
+        </div>
+        <label class="prompt-block" for="prompt-input">
+          <span>Freeform Gemini Prompt</span>
+          <textarea id="prompt-input" rows="4">Run a network health check and summarize what is working.</textarea>
+        </label>
+        <button id="ask-btn" class="primary wide">Queue Gemini Request</button>
+        <div class="mini-log" id="action-log">Ready.</div>
+      </section>
+
+      <section class="panel result">
+        <div class="panel-header">
+          <h2>Latest Agent Report</h2>
+          <span id="last-ts">Waiting for data</span>
+        </div>
+        <pre id="report-content" class="report-box">No agent output yet.</pre>
+      </section>
+
+      <section class="panel timeline">
+        <div class="panel-header">
+          <h2>Recent Inbox</h2>
+          <span>Newest queued commands</span>
+        </div>
+        <div id="inbox-list" class="list"></div>
+      </section>
+
+      <section class="panel timeline">
+        <div class="panel-header">
+          <h2>Recent Outbox</h2>
+          <span>Newest agent replies</span>
+        </div>
+        <div id="outbox-list" class="list"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
