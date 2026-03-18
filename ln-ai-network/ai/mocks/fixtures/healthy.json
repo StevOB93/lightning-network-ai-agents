@@ -11,8 +11,28 @@
     "3": { "node": 3, "alias": "C", "id": "02cc", "blockheight": 120, "num_peers": 1, "num_channels": 1, "warning": null }
   },
   "ln_listfunds": {
-    "1": { "node": 1, "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 }, "channels": [] },
-    "2": { "node": 2, "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 }, "channels": [] },
-    "3": { "node": 3, "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 }, "channels": [] }
+    "1": {
+      "node": 1,
+      "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 },
+      "channels": [
+        { "channel_id": "1x1x0", "peer_node": 2, "capacity_sat": 200000, "local_sat": 120000, "remote_sat": 80000, "ppm_fee": 1000, "active": true },
+        { "channel_id": "1x2x0", "peer_node": 3, "capacity_sat": 100000, "local_sat": 60000, "remote_sat": 40000, "ppm_fee": 500,  "active": true }
+      ]
+    },
+    "2": {
+      "node": 2,
+      "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 },
+      "channels": [
+        { "channel_id": "1x1x0", "peer_node": 1, "capacity_sat": 200000, "local_sat": 80000,  "remote_sat": 120000, "ppm_fee": 1000, "active": true },
+        { "channel_id": "2x1x0", "peer_node": 3, "capacity_sat": 150000, "local_sat": 90000,  "remote_sat": 60000,  "ppm_fee": 800,  "active": true }
+      ]
+    },
+    "3": {
+      "node": 3,
+      "funds": { "confirmed_sat": 300000, "unconfirmed_sat": 0 },
+      "channels": [
+        { "channel_id": "1x2x0", "peer_node": 1, "capacity_sat": 100000, "local_sat": 40000,  "remote_sat": 60000,  "ppm_fee": 500,  "active": true }
+      ]
+    }
   }
 }

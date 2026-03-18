@@ -2,3 +2,6 @@ jsonschema
 openai>=1.0.0
 requests
 google-genai>=1.0.0
+
+# Test dependencies
+pytest>=7.0
