@@ -53,8 +53,18 @@ def create_backend():
         # Let OpenAIBackend enforce OPENAI_API_KEY if needed
         return OpenAIBackend()
 
+    if backend in ("gemini", "gemini_backend"):
+        try:
+            from ai.llm.adapters.gemini_backend import GeminiBackend  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "LLM_BACKEND=gemini selected, but GeminiBackend could not be imported. "
+                f"Import error: {e.__class__.__name__}: {e}"
+            )
+        return GeminiBackend()
+
     raise RuntimeError(
-        f"Unknown LLM backend '{backend}'. Set LLM_BACKEND=ollama or LLM_BACKEND=openai."
+        f"Unknown LLM backend '{backend}'. Set LLM_BACKEND=ollama, openai, or gemini."
     )
 
 
@@ -101,7 +111,18 @@ def create_backend_for_role(role: str):
         model = _env(f"{role_upper}_OPENAI_MODEL") or _env("OPENAI_MODEL") or None
         return OpenAIBackend(model=model)
 
+    if backend in ("gemini", "gemini_backend"):
+        try:
+            from ai.llm.adapters.gemini_backend import GeminiBackend  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                f"LLM backend for role '{role}' is gemini, but GeminiBackend could not be imported. "
+                f"Import error: {e.__class__.__name__}: {e}"
+            )
+        model = _env(f"{role_upper}_GEMINI_MODEL") or _env("GEMINI_MODEL") or None
+        return GeminiBackend(model=model)
+
     raise RuntimeError(
         f"Unknown LLM backend '{backend}' for role '{role}'. "
-        "Set LLM_BACKEND=ollama or LLM_BACKEND=openai."
+        "Set LLM_BACKEND=ollama, openai, or gemini."
     )

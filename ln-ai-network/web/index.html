@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lightning Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+
+    <!-- ── Status bar ── -->
+    <header class="status-bar">
+      <div class="status-bar-brand">
+        <span class="bolt">⚡</span>
+        <span class="brand-name">Lightning Agent</span>
+        <code class="build-tag" id="pipeline-build">—</code>
+      </div>
+      <div class="status-bar-indicators">
+        <div class="indicator" id="ind-agent">
+          <span class="dot"></span>
+          <span class="ind-label">Agent</span>
+          <code class="ind-value" id="agent-lock-val">checking…</code>
+        </div>
+        <div class="indicator">
+          <span class="ind-label">Last&nbsp;Request</span>
+          <code class="ind-value" id="last-request-id">—</code>
+        </div>
+        <div class="indicator">
+          <span class="ind-label">Messages</span>
+          <code class="ind-value" id="msg-count">—</code>
+        </div>
+      </div>
+    </header>
+
+    <!-- ── Prompt input (hero action) ── -->
+    <section class="card prompt-hero">
+      <div class="prompt-hero-copy">
+        <h1>What should the agent do?</h1>
+        <p class="lede">Type any Lightning Network instruction. The agent will translate it into a plan, then execute each step via MCP tools.</p>
+      </div>
+      <div class="prompt-hero-form">
+        <textarea
+          id="prompt-input"
+          rows="3"
+          placeholder="e.g. Open a 500,000 sat channel to node 02abc… then pay invoice lnbc…"
+        ></textarea>
+        <div class="prompt-actions">
+          <button id="ask-btn" class="btn-primary">
+            <span class="btn-icon">▶</span> Queue Request
+          </button>
+          <button id="health-btn" class="btn-secondary">Health Check</button>
+          <button id="refresh-btn" class="btn-ghost">↻ Refresh</button>
+        </div>
+        <div class="action-log" id="action-log">Ready.</div>
+      </div>
+    </section>
+
+    <!-- ── Pipeline stages ── -->
+    <section class="pipeline-stages">
+      <div class="stage-connector"></div>
+
+      <!-- Stage 1: Translator -->
+      <div class="stage-card" id="stage-translator">
+        <div class="stage-header">
+          <span class="stage-num">1</span>
+          <div>
+            <div class="stage-title">Translator</div>
+            <div class="stage-subtitle">Natural language → Intent</div>
+          </div>
+          <span class="stage-badge" id="badge-translator">—</span>
+        </div>
+        <div class="stage-body" id="intent-display">
+          <div class="empty-state">No pipeline run yet.</div>
+        </div>
+      </div>
+
+      <!-- Stage 2: Planner -->
+      <div class="stage-card" id="stage-planner">
+        <div class="stage-header">
+          <span class="stage-num">2</span>
+          <div>
+            <div class="stage-title">Planner</div>
+            <div class="stage-subtitle">Intent → Execution plan</div>
+          </div>
+          <span class="stage-badge" id="badge-planner">—</span>
+        </div>
+        <div class="stage-body" id="plan-display">
+          <div class="empty-state">No pipeline run yet.</div>
+        </div>
+      </div>
+
+      <!-- Stage 3: Executor -->
+      <div class="stage-card" id="stage-executor">
+        <div class="stage-header">
+          <span class="stage-num">3</span>
+          <div>
+            <div class="stage-title">Executor</div>
+            <div class="stage-subtitle">Plan → MCP tool calls</div>
+          </div>
+          <span class="stage-badge" id="badge-executor">—</span>
+        </div>
+        <div class="stage-body" id="exec-display">
+          <div class="empty-state">No pipeline run yet.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Final summary ── -->
+    <section class="card summary-card" id="summary-card" style="display:none">
+      <div class="summary-header">
+        <span class="summary-icon" id="summary-icon">✓</span>
+        <div>
+          <div class="summary-title">Agent Summary</div>
+          <div class="summary-ts" id="summary-ts"></div>
+        </div>
+      </div>
+      <pre class="summary-body" id="summary-body"></pre>
+    </section>
+
+    <!-- ── Network visualization ── -->
+    <section class="card network-card">
+      <div class="card-header">
+        <h2>Network Graph</h2>
+        <div class="card-header-actions">
+          <button id="network-refresh-btn" class="btn-ghost small">↻ Refresh</button>
+          <span class="network-hint" id="network-hint">Populated from tool call results</span>
+        </div>
+      </div>
+      <div id="network-viz" class="network-viz">
+        <div class="empty-state">Run a health check or node query to populate the graph.</div>
+      </div>
+    </section>
+
+    <!-- ── Bottom panels: trace + queues ── -->
+    <div class="bottom-grid">
+
+      <!-- Trace log -->
+      <section class="card trace-card">
+        <div class="card-header">
+          <h2>Live Trace Log</h2>
+          <span class="auto-badge">auto</span>
+        </div>
+        <div id="trace-log" class="trace-log">
+          <div class="empty-state">No trace events yet.</div>
+        </div>
+      </section>
+
+      <!-- Inbox / Outbox -->
+      <div class="queue-panels">
+        <section class="card queue-card">
+          <div class="card-header">
+            <h2>Inbox</h2>
+            <span class="queue-count" id="inbox-count">0</span>
+          </div>
+          <div id="inbox-list" class="item-list"></div>
+        </section>
+        <section class="card queue-card">
+          <div class="card-header">
+            <h2>Outbox</h2>
+            <span class="queue-count" id="outbox-count">0</span>
+          </div>
+          <div id="outbox-list" class="item-list"></div>
+        </section>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
