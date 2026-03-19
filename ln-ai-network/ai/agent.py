@@ -3,7 +3,6 @@ from __future__ import annotations
 import atexit
 import json
 import os
-import re
 import sys
 import time
 import traceback
@@ -15,6 +14,19 @@ from ai.command_queue import read_new, write_outbox
 from ai.llm.base import LLMRequest
 from ai.llm.factory import create_backend
 from ai.mcp_client import FastMCPClientWrapper, MCPClient
+from ai.tools import (
+    FALLBACK_ALLOWED_TOOLS,
+    READ_ONLY_TOOLS,
+    STATE_CHANGING_TOOLS,
+    TOOL_REQUIRED,
+    _coerce_int_fields,
+    _is_tool_error,
+    _normalize_tool_args,
+    _summarize_tool_result,
+    _tool_sig,
+    _try_parse_tool_call,
+    llm_tools_schema,
+)
 from mcp.client.fastmcp import FastMCPClient
 
 try:
@@ -181,7 +193,7 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     return cur
 
 
-def _is_tool_error(result: Any) -> Optional[str]:
+def _is_tool_error(result: Any) -> Optional[str]:  # noqa: F811 — local copy shadows ai.tools import
     if not isinstance(result, dict):
         return None
 
@@ -639,7 +651,7 @@ class LightningAgent:
             self._write_report(req_id, "LLM is disabled (ALLOW_LLM!=1).")
             return
 
-        tools = self._llm_tools_full()
+        tools = llm_tools_schema()
         tool_calls_made: List[str] = []
         json_only = _json_only_requested(user_text)
         wants_pay_flow = _text_wants_payment_flow(user_text)

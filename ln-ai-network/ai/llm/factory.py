@@ -56,3 +56,52 @@ def create_backend():
     raise RuntimeError(
         f"Unknown LLM backend '{backend}'. Set LLM_BACKEND=ollama or LLM_BACKEND=openai."
     )
+
+
+def create_backend_for_role(role: str):
+    """
+    Select an LLM backend for a specific pipeline role (translator, planner, executor).
+
+    Selection order:
+      1) {ROLE}_LLM_BACKEND env var (e.g. TRANSLATOR_LLM_BACKEND)
+      2) LLM_BACKEND / AI_LLM_BACKEND env var
+      3) default to 'ollama'
+
+    Model override:
+      {ROLE}_OLLAMA_MODEL overrides OLLAMA_MODEL for Ollama backends.
+      {ROLE}_OPENAI_MODEL overrides OPENAI_MODEL for OpenAI backends.
+    """
+    role_upper = role.upper().replace("-", "_")
+    backend = (
+        _env(f"{role_upper}_LLM_BACKEND")
+        or _env("LLM_BACKEND")
+        or _env("AI_LLM_BACKEND")
+        or "ollama"
+    ).lower()
+
+    if backend in ("ollama", "local", "ollama_backend"):
+        try:
+            from ai.llm.adapters.ollama_backend import OllamaBackend  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                f"LLM backend for role '{role}' is ollama, but OllamaBackend could not be imported. "
+                f"Import error: {e.__class__.__name__}: {e}"
+            )
+        model = _env(f"{role_upper}_OLLAMA_MODEL") or _env("OLLAMA_MODEL") or None
+        return OllamaBackend(model=model)
+
+    if backend in ("openai", "openai_backend"):
+        try:
+            from ai.llm.adapters.openai_backend import OpenAIBackend  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                f"LLM backend for role '{role}' is openai, but OpenAIBackend could not be imported. "
+                f"Import error: {e.__class__.__name__}: {e}"
+            )
+        model = _env(f"{role_upper}_OPENAI_MODEL") or _env("OPENAI_MODEL") or None
+        return OpenAIBackend(model=model)
+
+    raise RuntimeError(
+        f"Unknown LLM backend '{backend}' for role '{role}'. "
+        "Set LLM_BACKEND=ollama or LLM_BACKEND=openai."
+    )
