@@ -78,9 +78,30 @@ else
   exit 1
 fi
 
+# Persist NODE_COUNT so stop.sh / shutdown.sh can read it without arguments
+mkdir -p "${RUNTIME_DIR:-$PROJECT_ROOT/runtime}"
+echo "$NODE_COUNT" > "${RUNTIME_DIR:-$PROJECT_ROOT/runtime}/node_count"
+
+# Validate LLM credentials before spending time starting infra
+_llm_backend="${LLM_BACKEND:-${LLM_PROVIDER:-openai}}"
+if [[ "$_llm_backend" == "openai" ]]; then
+  if [[ -z "${OPENAI_API_KEY:-}" || "${OPENAI_API_KEY:-}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
+    echo "[FATAL] OPENAI_API_KEY is not set or is still a placeholder."
+    echo "[HINT]  Copy .env.example → .env and set a real OPENAI_API_KEY, or switch to LLM_BACKEND=ollama."
+    exit 1
+  fi
+fi
+if [[ "$_llm_backend" == "gemini" ]]; then
+  if [[ -z "${GEMINI_API_KEY:-}" || "${GEMINI_API_KEY:-}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
+    echo "[FATAL] GEMINI_API_KEY is not set or is still a placeholder."
+    echo "[HINT]  Set GEMINI_API_KEY in your .env file."
+    exit 1
+  fi
+fi
+
 # Safe provider banner (no secrets)
-echo "[INFO] LLM_PROVIDER=${LLM_PROVIDER:-openai}"
-if [[ "${LLM_PROVIDER:-openai}" == "ollama" ]]; then
+echo "[INFO] LLM_BACKEND=${_llm_backend}"
+if [[ "$_llm_backend" == "ollama" ]]; then
   echo "[INFO] OLLAMA_MODEL=${OLLAMA_MODEL:-}"
   echo "[INFO] OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}"
 fi

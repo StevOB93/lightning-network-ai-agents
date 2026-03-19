@@ -88,5 +88,30 @@ if ! kill -0 "$UI_PID" >/dev/null 2>&1; then
 fi
 
 echo "[UI] UI server running (PID $UI_PID)."
-echo "[UI] Open http://$UI_HOST:$UI_PORT in your browser."
+echo "[UI] Web UI: http://$UI_HOST:$UI_PORT"
+
+# Attempt to open the browser (WSL + Linux compatible)
+_open_browser() {
+  local url="$1"
+  # wslu (WSL utility) — most reliable on WSL
+  if command -v wslview >/dev/null 2>&1; then
+    wslview "$url" &>/dev/null & return 0
+  fi
+  # Windows explorer.exe — always available in WSL
+  if command -v explorer.exe >/dev/null 2>&1; then
+    explorer.exe "$url" &>/dev/null & return 0
+  fi
+  # Native Linux fallback
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" &>/dev/null & return 0
+  fi
+  return 1
+}
+
+if _open_browser "http://$UI_HOST:$UI_PORT"; then
+  echo "[UI] Browser opened."
+else
+  echo "[UI] Could not auto-open browser — navigate to http://$UI_HOST:$UI_PORT"
+fi
+
 echo "[UI] UI server layer ready."

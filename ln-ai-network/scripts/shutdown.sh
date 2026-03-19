@@ -11,7 +11,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-NODE_COUNT="${1:-2}"
+NODE_COUNT="${1:-}"
+
+# If no argument given, read the count stored by 1.start.sh at last boot
+if [[ -z "$NODE_COUNT" ]]; then
+  _STORED="$PROJECT_ROOT/runtime/node_count"
+  if [[ -f "$_STORED" ]]; then
+    NODE_COUNT="$(cat "$_STORED")"
+    echo "[INFO] Using stored NODE_COUNT=$NODE_COUNT (from runtime/node_count)"
+  else
+    NODE_COUNT=2
+    echo "[INFO] No stored node count — defaulting to NODE_COUNT=2"
+  fi
+fi
 
 # Validate NODE_COUNT is a positive integer
 if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]] || [[ "$NODE_COUNT" -lt 1 ]]; then
