@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -211,8 +212,79 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"events": _read_trace_tail()})
         elif route == "/api/network":
             self._json(HTTPStatus.OK, _extract_network_data())
+        elif route == "/api/stream":
+            self._sse_stream()
         else:
             self._serve_static(parsed.path)
+
+    def _sse_stream(self) -> None:
+        """Server-Sent Events endpoint — pushes live updates to the browser."""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def send(event: str, data: Any) -> bool:
+            try:
+                msg = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+                self.wfile.write(msg.encode("utf-8"))
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return False
+
+        qp = paths()
+        last_outbox_mtime: float = 0.0
+        last_trace_mtime: float = 0.0
+        last_inbox_mtime: float = 0.0
+
+        # Send initial full state snapshot
+        if not send("status", _runtime_snapshot()):
+            return
+        result = _latest_pipeline_result()
+        if result:
+            if not send("pipeline_result", {"result": result}):
+                return
+        if not send("trace", {"events": _read_trace_tail(limit=50)}):
+            return
+
+        try:
+            while True:
+                time.sleep(0.4)
+
+                # Outbox changed → new pipeline result or status
+                if qp.outbox.exists():
+                    mtime = qp.outbox.stat().st_mtime
+                    if mtime > last_outbox_mtime:
+                        last_outbox_mtime = mtime
+                        if not send("status", _runtime_snapshot()):
+                            return
+                        r = _latest_pipeline_result()
+                        if r and not send("pipeline_result", {"result": r}):
+                            return
+
+                # Trace log changed → stream new events
+                trace_path = RUNTIME_DIR / "trace.log"
+                if trace_path.exists():
+                    mtime = trace_path.stat().st_mtime
+                    if mtime > last_trace_mtime:
+                        last_trace_mtime = mtime
+                        if not send("trace", {"events": _read_trace_tail(limit=50)}):
+                            return
+
+                # Inbox changed → update counts
+                if qp.inbox.exists():
+                    mtime = qp.inbox.stat().st_mtime
+                    if mtime > last_inbox_mtime:
+                        last_inbox_mtime = mtime
+                        if not send("status", _runtime_snapshot()):
+                            return
+
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # Client disconnected cleanly
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

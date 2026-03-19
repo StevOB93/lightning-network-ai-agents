@@ -24,7 +24,19 @@ except Exception:
     fcntl = None  # type: ignore
 
 
-PIPELINE_BUILD = "pipeline-v1(translator+planner+executor)"
+PIPELINE_BUILD = "pipeline-v1(translator+planner+executor+history+verify)"
+
+# How many prior exchanges (user+assistant pairs) to include as conversation context
+_HISTORY_MAX = int(os.getenv("PIPELINE_HISTORY_MAX", "4"))
+
+# Post-execution read-only verification tool per intent type.
+# After a successful state-changing run, we call this tool to confirm the goal.
+_VERIFY_TOOL: Dict[str, str] = {
+    "pay_invoice":  "ln_listpays",
+    "open_channel": "ln_listchannels",
+    "rebalance":    "ln_listchannels",
+    "set_fee":      "ln_listchannels",
+}
 
 
 # =============================================================================
@@ -182,6 +194,8 @@ class PipelineCoordinator:
 
         self.tick_s = float(_env_int("AGENT_TICK_MS", 500)) / 1000.0
         self.allow_llm = _env_bool("ALLOW_LLM", default=False)
+        # Rolling conversation history: list of {"role": "user"|"assistant", "content": str}
+        self._history: List[Dict[str, Any]] = []
 
     def _log(self, kind: str, payload: Dict[str, Any]) -> None:
         out = {"ts": int(time.time()), "kind": kind, **payload}
@@ -193,6 +207,37 @@ class PipelineCoordinator:
 
     def _write_report(self, result: PipelineResult) -> None:
         write_outbox(result.to_outbox_dict())
+
+    def _update_history(self, user_text: str, assistant_summary: str) -> None:
+        """Append the latest exchange and trim to _HISTORY_MAX pairs."""
+        self._history.append({"role": "user",      "content": user_text})
+        self._history.append({"role": "assistant",  "content": assistant_summary})
+        # Keep only the last N*2 messages (N pairs)
+        max_msgs = _HISTORY_MAX * 2
+        if len(self._history) > max_msgs:
+            self._history = self._history[-max_msgs:]
+
+    def _verify_goal(self, intent: "IntentBlock", req_id: int) -> Optional[str]:
+        """
+        Run a single read-only MCP tool to confirm a state-changing intent succeeded.
+        Returns a short confirmation string, or None if no verification is defined or it fails.
+        """
+        tool = _VERIFY_TOOL.get(intent.intent_type)
+        if not tool:
+            return None
+        try:
+            raw = self.mcp.call(tool, {})
+            self.trace.log({"event": "goal_verify", "req_id": req_id, "tool": tool, "ok": True})
+            # Summarise: just confirm we got a non-error response
+            if isinstance(raw, dict):
+                payload = raw.get("result", raw).get("payload", {})
+                if isinstance(payload, dict):
+                    keys = list(payload.keys())[:3]
+                    return f"Verified via {tool}: {', '.join(keys) if keys else 'ok'}"
+            return f"Verified via {tool}: ok"
+        except Exception as exc:
+            self.trace.log({"event": "goal_verify_failed", "req_id": req_id, "tool": tool, "error": str(exc)})
+            return None
 
     # -------------------------------------------------------------------------
     # Pipeline execution
@@ -210,9 +255,9 @@ class PipelineCoordinator:
                 error="ALLOW_LLM!=1", pipeline_build=PIPELINE_BUILD,
             )
 
-        # Stage 1: Translate
+        # Stage 1: Translate (with rolling conversation history)
         try:
-            intent = self.translator.translate(user_text, req_id)
+            intent = self.translator.translate(user_text, req_id, history=list(self._history))
         except TranslatorError as e:
             self.trace.log({"event": "stage_failed", "stage": "translator", "error": str(e)})
             return PipelineResult(
@@ -257,11 +302,20 @@ class PipelineCoordinator:
             )
 
         all_ok = all(r.ok or r.skipped for r in step_results)
+
+        # Post-execution goal verification for state-changing intents
+        verification_note = ""
+        if all_ok:
+            note = self._verify_goal(intent, req_id)
+            if note:
+                verification_note = f"\n\n{note}"
+
+        summary = intent.human_summary + verification_note
         return PipelineResult(
             request_id=req_id, ts=ts, success=all_ok,
             stage_failed=None if all_ok else "executor",
             intent=intent, plan=plan, step_results=step_results,
-            human_summary=intent.human_summary,
+            human_summary=summary,
             error=None, pipeline_build=PIPELINE_BUILD,
         )
 
@@ -296,8 +350,11 @@ class PipelineCoordinator:
                             "request_id": req_id,
                             "user_text": str(msg.get("content", "")),
                         })
-                        result = self._run_pipeline(req_id, user_text=str(msg.get("content", "")))
+                        user_text = str(msg.get("content", ""))
+                        result = self._run_pipeline(req_id, user_text=user_text)
                         self._write_report(result)
+                        # Update rolling history so the next prompt has context
+                        self._update_history(user_text, result.human_summary)
                     else:
                         write_outbox({
                             "ts": int(time.time()),

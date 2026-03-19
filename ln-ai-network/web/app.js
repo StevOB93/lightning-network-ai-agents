@@ -497,10 +497,56 @@ promptInput.addEventListener("keydown", e => {
 });
 
 // ---------------------------------------------------------------------------
-// Polling
+// Server-Sent Events (primary) + polling fallback
 // ---------------------------------------------------------------------------
+let _sseActive = false;
+
+function startSSE() {
+  if (typeof EventSource === "undefined") return false;
+  const es = new EventSource("/api/stream");
+
+  es.addEventListener("status", e => {
+    try {
+      const data = JSON.parse(e.data);
+      updateStatusBar(data);
+      renderQueue(inboxList, inboxCount, data.recent_inbox, "Req");
+      renderQueue(outboxList, outboxCount, data.recent_outbox, "Rep");
+    } catch (_) {}
+  });
+
+  es.addEventListener("pipeline_result", e => {
+    try {
+      const { result } = JSON.parse(e.data);
+      if (result) renderPipelineResult(result);
+    } catch (_) {}
+  });
+
+  es.addEventListener("trace", e => {
+    try {
+      const { events } = JSON.parse(e.data);
+      renderTrace(events);
+    } catch (_) {}
+  });
+
+  es.onopen = () => { _sseActive = true; };
+
+  es.onerror = () => {
+    _sseActive = false;
+    es.close();
+    // Reconnect after 5s
+    setTimeout(startSSE, 5000);
+  };
+
+  return true;
+}
+
+// Initial load then start SSE
 refreshAll().catch(e => setLog(e.message, true));
-setInterval(() => fetchStatus().catch(() => {}), 2500);
-setInterval(() => fetchPipelineResult().catch(() => {}), 3000);
-setInterval(() => fetchTrace().catch(() => {}), 2000);
+startSSE();
+
+// Polling fallback — only fires if SSE is not delivering updates
+setInterval(() => { if (!_sseActive) fetchStatus().catch(() => {}); }, 3000);
+setInterval(() => { if (!_sseActive) fetchPipelineResult().catch(() => {}); }, 4000);
+setInterval(() => { if (!_sseActive) fetchTrace().catch(() => {}); }, 3000);
+// Network graph always polls (it's infrequent and not SSE-driven)
 setInterval(() => fetchNetwork().catch(() => {}), 15000);

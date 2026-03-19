@@ -113,16 +113,24 @@ class Translator:
         self.backend = backend
         self.trace = trace  # TraceLogger instance
 
-    def translate(self, raw_prompt: str, req_id: int) -> IntentBlock:
+    def translate(
+        self,
+        raw_prompt: str,
+        req_id: int,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> IntentBlock:
         """
         Parse raw_prompt into a structured IntentBlock via a single LLM call.
         Retries up to config.max_retries times on JSON parse failure.
         Raises TranslatorError if all attempts fail.
+
+        history: optional list of prior {"role": "user"|"assistant", "content": str}
+                 dicts providing conversation context for follow-up prompts.
         """
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": raw_prompt},
-        ]
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        for turn in (history or []):
+            messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": raw_prompt})
 
         last_error: str = "unknown"
         for attempt in range(1, self.config.max_retries + 2):

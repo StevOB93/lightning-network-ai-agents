@@ -1,157 +1,137 @@
-# LN AI Network (Regtest) — Prompt-Driven Lightning Agent
+# LN AI Network — Prompt-Driven Lightning Agent (Regtest)
 
-This repo runs a **prompt-driven AI Lightning agent** on **regtest** that can autonomously complete workflows (e.g., end-to-end payments), while respecting a strict execution boundary:
+A **3-stage AI pipeline** that autonomously completes Lightning Network workflows on regtest. Type a prompt — the agent translates it into a structured intent, plans a sequence of MCP tool calls, and executes them.
 
-**The agent may ONLY act via MCP tools** (no direct shell actions).
-
----
-
-## What you get
-
-- `ai/agent.py`: the controller/agent
-  - Reads prompts from `runtime/agent/inbox.jsonl`
-  - Writes reports to `runtime/agent/outbox.jsonl`
-  - Logs a full per-prompt trace to `runtime/agent/trace.log` (**resets every new prompt**)
-  - Enforces deterministic safety policies:
-    - fail fast on tool errors
-    - no redundant read-only tool calls unless state changed
-    - oscillation detection
-    - requires tools when goal unmet
-    - deterministic tool-arg normalization (unwraps nested args + coerces ints)
-
-- `mcp/ln_mcp_server.py`: the MCP tool boundary
-  - Executes `bitcoin-cli` / `lightning-cli` operations
-  - Exposes a tool surface the agent calls by name
-
-- `scripts/restart_agent.sh`: clean restart + fresh mode
-
-More detail:
-- `docs/README.md`
+**Strict boundary: the agent may ONLY act via MCP tools. No direct shell access.**
 
 ---
 
 ## Quick Start
 
-### 1) Start the agent (fresh run)
+### 1. Install
+
 ```bash
-cd ~/lightning-network-ai-agents/ln-ai-network
-scripts/restart_agent.sh fresh
-tail -n 20 runtime/agent/agent.log
+cd ln-ai-network
+./scripts/0.install.sh
+cp .env.example .env
+# Edit .env: set OPENAI_API_KEY (or configure Ollama/Gemini), set ALLOW_LLM=1
 ```
 
-You should see an `agent_start` line with a `build` tag.
+### 2. Start the full system
 
-### 2) Send a prompt
-You should have a shell helper function `ai_prompt`. Example:
 ```bash
-ai_prompt "SMOKE TEST: call network_health and summarize."
+./scripts/1.start.sh 2
 ```
 
-Check output:
+This starts:
+- Bitcoin (regtest) + Core Lightning nodes
+- The AI pipeline (`ai/pipeline.py`)
+- The web UI server at **http://127.0.0.1:8008**
+
+### 3. Open the web UI
+
+Navigate to `http://127.0.0.1:8008` and type a prompt in the input box.
+
+Or use the CLI:
+
 ```bash
-tail -n 5 runtime/agent/outbox.jsonl
-```
-
----
-
-## End-to-End Payment Test (Regtest)
-
-Use this prompt to perform a full E2E payment flow.
-
-```bash
-ai_prompt 'END-TO-END PAYMENT TEST (REGTEST) — MUST COMPLETE OR REPORT EXACT BLOCKER
-
-BOUNDARY:
-- MCP tools only. No shell instructions.
-- Fail fast: if any tool returns an error, STOP and report it.
-- Nodes are 1-based: node=1 and node=2 only.
-
-SUCCESS CRITERIA:
-- node-1 and node-2 are running
-- node-1 is connected to node-2 as a peer
-- at least one confirmed/usable channel exists between node-1 and node-2
-- node-2 creates an invoice for exactly 10,000 msat
-- node-1 pays it using the exact payload.bolt11 string
-- output strict JSON with e2e_ok=true
-
-OUTPUT FORMAT (STRICT JSON ONLY):
-Return ONE JSON object:
-{
-  "e2e_ok": boolean,
-  "steps": [ {"name": string, "status": "ok"|"skip"|"fail", "details": object} ],
-  "artifacts": {
-    "node2_id": string|null,
-    "node2_host": string|null,
-    "node2_port": number|null,
-    "funding": {"node1_addr": string|null, "node2_addr": string|null, "miner_addr": string|null},
-    "invoice": {"bolt11": string|null, "msat": number|null, "label": string|null},
-    "payment": {"status": string|null, "preimage": string|null}
-  },
-  "final_state": {
-    "nodes_running": number,
-    "node1_peers": number,
-    "node1_channels": number,
-    "node2_peers": number,
-    "node2_channels": number
-  },
-  "tool_calls": [ {"tool": string, "args": object, "result_summary": string} ],
-  "blocker": string|null
-}
-
-PLAN:
-1) network_health
-2) ensure node-2 running (ln_node_status, ln_node_start if needed)
-3) ln_getinfo node=2 -> get id + binding
-4) ln_connect from_node=1 -> node-2
-5) fund both nodes (btc_wallet_ensure miner, ln_newaddr both, btc_sendtoaddress both, mine blocks)
-6) open channel (ln_openchannel), mine confirmations until active
-7) ln_invoice node=2 amount_msat=10000
-8) ln_pay from_node=1 using EXACT invoice string payload.bolt11
-9) verify + output strict JSON only'
+source .venv/bin/activate
+python -c "from ai.command_queue import enqueue; enqueue('check network health', meta={'kind':'freeform','use_llm':True})"
+tail -n 1 runtime/agent/outbox.jsonl | python3 -m json.tool
 ```
 
 ---
 
-## Logs & Debugging
+## Pipeline Architecture
 
-### Outbox (agent reports)
-```bash
-tail -n 3 runtime/agent/outbox.jsonl
+```
+Prompt → [Translator] → IntentBlock → [Planner] → ExecutionPlan → [Executor] → Results
 ```
 
-### Trace (full per-prompt, resets each prompt)
+| Stage | Input | Output | LLM? |
+|-------|-------|--------|------|
+| Translator | Raw text | IntentBlock (goal, intent_type, context) | Yes |
+| Planner | IntentBlock | ExecutionPlan (ordered tool steps) | Yes |
+| Executor | ExecutionPlan | List[StepResult] (per-tool results) | No (MCP only) |
+
+**Features:**
+- Multi-turn conversation — last 4 exchanges carried as context for follow-up prompts
+- Goal verification — after state-changing intents, a read-only MCP call confirms success
+- Retry / skip / abort error policies per step
+- `$step1.result.payload.bolt11` placeholder chaining between steps
+- Per-stage LLM backend config (mix Ollama for planning, OpenAI for translation, etc.)
+
+---
+
+## LLM Backends
+
+| Backend | Env var | Requires |
+|---------|---------|---------|
+| Ollama (local) | `LLM_BACKEND=ollama` | Ollama running locally |
+| OpenAI | `LLM_BACKEND=openai` | `OPENAI_API_KEY` |
+| Gemini | `LLM_BACKEND=gemini` | `GEMINI_API_KEY` |
+
+Per-stage overrides: `TRANSLATOR_LLM_BACKEND`, `PLANNER_LLM_BACKEND`
+
+---
+
+## Web UI
+
+The dashboard at `http://127.0.0.1:8008` shows:
+- **Prompt input** — submit any Lightning Network instruction
+- **Pipeline stage cards** — Translator → IntentBlock, Planner → plan steps, Executor → per-step results
+- **Network graph** — D3 force-directed visualization of nodes and channels (auto-populated from tool results)
+- **Live trace log** — real-time event stream via Server-Sent Events
+- **Inbox / Outbox** — message history
+
+---
+
+## Running Tests
+
 ```bash
-tail -n 120 runtime/agent/trace.log
+cd ln-ai-network
+source .venv/bin/activate
+python -m pytest ai/tests/ -v
 ```
 
-### Agent runtime log
-```bash
-tail -n 120 runtime/agent/agent.log
+---
+
+## Logs
+
+| File | Contents |
+|------|---------|
+| `runtime/agent/trace.log` | Per-prompt trace (resets each request) |
+| `runtime/agent/outbox.jsonl` | Pipeline results |
+| `logs/system/0.3.agent_boot.log` | Pipeline process log |
+| `logs/system/0.4.ui_server.log` | Web UI server log |
+
+---
+
+## End-to-End Payment Prompt (Regtest)
+
+```
+Open a 500,000 sat channel from node 1 to node 2, then have node 2 create an
+invoice for 10,000 msat and pay it from node 1.
 ```
 
-### Save a trace run
-```bash
-mkdir -p runtime/agent/archive
-cp runtime/agent/trace.log runtime/agent/archive/trace.$(date +%Y%m%d_%H%M%S).log
+Paste this into the web UI or CLI. The agent will plan and execute every step.
+
+---
+
+## Project Layout
+
 ```
-
-For deeper details on tools and errors, see:
-- `docs/TOOLS.md`
-- `docs/TROUBLESHOOTING.md`
-
-# Documentation Index
-
-- **Tools**: `TOOLS.md` — MCP tool catalog, arguments, expected usage.
-- **Troubleshooting**: `TROUBLESHOOTING.md` — common failures, how to collect logs, fixes.
-
-## Recommended workflow
-
-1) Start agent:
-   - `scripts/restart_agent.sh fresh`
-
-2) Run the E2E payment prompt (see docs/quickstart/ `quickstart.md`)
-
-3) If it fails, collect:
-   - `tail -n 1 runtime/agent/outbox.jsonl`
-   - `tail -n 120 runtime/agent/trace.log`
-   - `tail -n 120 runtime/agent/agent.log`
+ln-ai-network/
+├── ai/                    # Pipeline, controllers, LLM backends
+│   ├── pipeline.py        # Main coordinator
+│   ├── controllers/       # translator, planner, executor
+│   ├── llm/               # factory + adapters (ollama, openai, gemini)
+│   ├── models.py          # Pipeline data structures
+│   ├── tools.py           # Tool registry and normalization
+│   └── tests/             # Unit + integration tests
+├── mcp/                   # MCP tool server (bitcoin-cli / lightning-cli)
+├── scripts/               # Start, install, startup sequence
+│   └── ui_server.py       # Web UI HTTP server
+├── web/                   # Frontend (HTML, JS, CSS)
+└── runtime/               # Created at runtime (inbox, outbox, logs)
+```
