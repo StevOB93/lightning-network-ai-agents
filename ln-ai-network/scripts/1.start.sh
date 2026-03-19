@@ -16,6 +16,7 @@ set -euo pipefail
 #   logs/system/0.1.infra_boot.log
 #   logs/system/0.2.control_plane_boot.log
 #   logs/system/0.3.agent_boot.log
+#   logs/system/0.4.ui_server.log
 ###############################################################################
 
 usage() {
@@ -191,8 +192,13 @@ run_step() {
 run_step "0.1.infra_boot"         "$PROJECT_ROOT/scripts/startup/0.1.infra_boot.sh"         "$NODE_COUNT"
 run_step "0.2.control_plane_boot" "$PROJECT_ROOT/scripts/startup/0.2.control_plane_boot.sh"
 run_step "0.3.agent_boot"         "$PROJECT_ROOT/scripts/startup/0.3.agent_boot.sh"         "$VENV_PY"
+run_step "0.4.ui_server"          "$PROJECT_ROOT/scripts/startup/0.4.ui_server.sh"           "$VENV_PY"
+
+UI_HOST="${UI_HOST:-127.0.0.1}"
+UI_PORT="${UI_PORT:-8008}"
 
 echo "=================================================="
 echo "SYSTEM READY"
-echo "Logs: $LOG_DIR"
+echo "Web UI:  http://$UI_HOST:$UI_PORT"
+echo "Logs:    $LOG_DIR"
 echo "=================================================="
