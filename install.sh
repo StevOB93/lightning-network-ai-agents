@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Lightning Network AI Agent — one-time setup
+# Lightning Network AI Agent — one-time install
 #
-# Run this once before your first ./run.sh
+# Run this once before your first ./start.sh
 # Installs Bitcoin Core, Core Lightning, Python venv, and dependencies.
 # =============================================================================
 set -euo pipefail

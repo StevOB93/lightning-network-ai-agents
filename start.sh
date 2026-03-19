@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Lightning Network AI Agent — top-level launcher
+# Lightning Network AI Agent — start the full system
+#
+# Starts Bitcoin (regtest), Lightning nodes, the AI pipeline,
+# and the web UI. Opens the browser automatically.
 #
 # Usage:
-#   ./run.sh           # start with 2 nodes (default)
-#   ./run.sh 3         # start with 3 nodes
+#   ./start.sh         # start with 2 nodes (default)
+#   ./start.sh 3       # start with 3 nodes
 #
-# First time? Run setup first:
-#   ./setup.sh
+# First time? Run install first:
+#   ./install.sh
 # =============================================================================
 set -euo pipefail
 

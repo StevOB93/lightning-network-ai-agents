@@ -11,7 +11,7 @@ A prompt-driven AI agent that autonomously executes Lightning Network workflows 
 ### Step 1 — One-time setup (first time only)
 
 ```bash
-./setup.sh
+./install.sh
 ```
 
 Installs Bitcoin Core, Core Lightning, Python venv, and all dependencies.
@@ -33,7 +33,7 @@ Edit `ln-ai-network/.env` and set your LLM key:
 ### Step 3 — Start
 
 ```bash
-./run.sh
+./start.sh
 ```
 
 The system starts, and the **web UI opens automatically** at `http://127.0.0.1:8008`.
@@ -106,10 +106,10 @@ python -m pytest ai/tests/ -v
 
 | Command | What it does |
 |---------|-------------|
-| `./run.sh` | Start the full system |
+| `./start.sh` | Start the full system |
 | `./stop.sh` | Stop everything cleanly |
-| `./setup.sh` | One-time install |
-| `./run.sh 3` | Start with 3 Lightning nodes |
+| `./install.sh` | One-time install |
+| `./start.sh 3` | Start with 3 Lightning nodes |
 | `cd ln-ai-network && ./scripts/restart_agent.sh` | Restart just the AI pipeline (no infra restart) |
 | `cd ln-ai-network && ./scripts/restart_agent.sh fresh` | Restart with cleared inbox/outbox |
 
@@ -139,7 +139,7 @@ Copy `.env.example` to `.env` and set a real API key, or switch to Ollama with `
 Check `ln-ai-network/logs/system/0.3.agent_boot.log`. Ensure `ALLOW_LLM=1` is set in `.env`.
 
 **bitcoind / lightningd not found**
-Run `./setup.sh` to install the required binaries.
+Run `./install.sh` to install the required binaries.
 
 **Port conflicts**
 Override ports in `.env`: `BITCOIN_RPC_PORT`, `LIGHTNING_BASE_PORT`, `UI_PORT`.
