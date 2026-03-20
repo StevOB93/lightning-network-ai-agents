@@ -2,7 +2,6 @@ from __future__ import annotations
 
 # Standard library
 import json
-import os
 import time
 import traceback
 from typing import Any, Dict, List, Optional
@@ -14,14 +13,17 @@ from ai.controllers.planner import Planner, PlannerConfig, PlannerError
 from ai.controllers.summarizer import Summarizer, SummarizerConfig
 from ai.controllers.translator import Translator, TranslatorConfig, TranslatorError
 from ai.core.config import AgentConfig
+from ai.core.registry import AgentRegistry
 from ai.core.scheduler import DeterministicScheduler
 from ai.llm.factory import create_backend_for_role
+from ai.llm.guarded_backend import GuardedBackend
 from ai.mcp_client import FastMCPClientWrapper, MCPClient
 from ai.models import IntentBlock, PipelineResult
 from ai.utils import (
     StartupLock,
     TraceLogger,
     _env_bool,
+    _env_int,
     _repo_root,
     _runtime_agent_dir,
 )
@@ -30,10 +32,6 @@ from mcp.client.fastmcp import FastMCPClient
 # Human-readable version string embedded in every pipeline report.
 # Changing this string signals to the UI that the codebase was updated.
 PIPELINE_BUILD = "pipeline-v1(translator+planner+executor+summarizer+history+verify)"
-
-# How many prior exchanges (user+assistant pairs) to include as conversation context.
-# Sliding window: older turns are dropped when this limit is reached.
-_HISTORY_MAX = int(os.getenv("PIPELINE_HISTORY_MAX", "2"))
 
 # Maps each state-changing intent type to a read-only MCP tool used to confirm
 # the operation actually took effect after execution. Called in _verify_goal().
@@ -88,11 +86,13 @@ class PipelineCoordinator:
         # connection management and retry logic on top of the bare FastMCPClient.
         self.mcp: MCPClient = FastMCPClientWrapper(FastMCPClient())
 
-        # Each stage gets its own LLM backend. "role" maps to a config section
-        # that can specify a different model, temperature, or system prompt prefix.
-        translator_backend = create_backend_for_role("translator")
-        planner_backend = create_backend_for_role("planner")
-        summarizer_backend = create_backend_for_role("summarizer")
+        # Each stage gets its own LLM backend wrapped in GuardedBackend, which
+        # enforces rate limiting, exponential backoff, and concurrency control
+        # using the values from AgentConfig. Each stage has independent state
+        # so a rate-limit on the summarizer does not block the translator.
+        translator_backend = GuardedBackend(create_backend_for_role("translator"), self._cfg)
+        planner_backend    = GuardedBackend(create_backend_for_role("planner"),     self._cfg)
+        summarizer_backend = GuardedBackend(create_backend_for_role("summarizer"),  self._cfg)
 
         # Shared trace logger — all four stages write to the same trace.log file
         self.trace = TraceLogger(_runtime_agent_dir() / "trace.log")
@@ -112,9 +112,50 @@ class PipelineCoordinator:
         # immediately rejected. Prevents accidental API usage during dev/testing.
         self.allow_llm = _env_bool("ALLOW_LLM", default=False)
 
+        # Agent registry — register this pipeline so other processes can route
+        # messages to it, and clean up stale entries from previous runs.
+        self._registry = AgentRegistry(_repo_root() / "runtime" / "registry.jsonl")
+        self._registry.purge_stale()
+        self._node = _env_int("NODE_NUMBER", 1)
+        self._registry.register(
+            "pipeline", node=self._node,
+            inbox_path=_runtime_agent_dir() / "inbox.jsonl",
+        )
+
+        # Persistent conversation history file — survives process restarts.
+        # Each line is a JSON {"role": ..., "content": ...} message.
+        self._history_path = _runtime_agent_dir() / "history.jsonl"
+
         # Rolling conversation history: list of {"role": "user"|"assistant", "content": str}
         # Injected into the Translator's messages so follow-up queries have context.
-        self._history: List[Dict[str, Any]] = []
+        # Loaded from disk on startup so context is preserved across restarts.
+        self._history: List[Dict[str, Any]] = self._load_history()
+
+    def _load_history(self) -> List[Dict[str, Any]]:
+        """
+        Load conversation history from disk on startup.
+
+        Reads the last cfg.max_history_messages * 2 lines from history.jsonl
+        so the history window is immediately populated after a restart. Lines
+        that fail to parse are silently skipped (corrupted entries don't block startup).
+        """
+        if not self._history_path.exists():
+            return []
+        try:
+            lines = self._history_path.read_text(encoding="utf-8").splitlines()
+            history = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    history.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            max_msgs = self._cfg.max_history_messages * 2
+            return history[-max_msgs:] if len(history) > max_msgs else history
+        except Exception:
+            return []
 
     def _log(self, kind: str, payload: Dict[str, Any]) -> None:
         """Emit a structured JSON log line to stdout (picked up by the process supervisor)."""
@@ -128,18 +169,28 @@ class PipelineCoordinator:
     def _update_history(self, user_text: str, assistant_summary: str) -> None:
         """
         Append the latest exchange to the rolling history buffer and trim to
-        _HISTORY_MAX pairs.
+        cfg.max_history_messages pairs.
 
         We store the intent's goal string (not the full verbose summary) as the
         assistant turn. This keeps the history compact and avoids injecting raw
         tool output JSON into subsequent prompts.
         """
-        self._history.append({"role": "user",      "content": user_text})
-        self._history.append({"role": "assistant",  "content": assistant_summary})
-        # Keep only the last N*2 messages (N user+assistant pairs)
-        max_msgs = _HISTORY_MAX * 2
+        new_msgs = [
+            {"role": "user",      "content": user_text},
+            {"role": "assistant", "content": assistant_summary},
+        ]
+        self._history.extend(new_msgs)
+        # Keep only the last N*2 messages (N user+assistant pairs) in memory
+        max_msgs = self._cfg.max_history_messages * 2
         if len(self._history) > max_msgs:
             self._history = self._history[-max_msgs:]
+        # Append the new pair to disk so it survives restarts (best-effort)
+        try:
+            with self._history_path.open("a", encoding="utf-8") as fh:
+                for msg in new_msgs:
+                    fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _verify_goal(self, intent: IntentBlock, req_id: int) -> Optional[str]:
         """
@@ -371,6 +422,41 @@ class PipelineCoordinator:
                         # (which may contain raw JSON from tool results).
                         history_summary = result.intent.goal if result.intent else result.human_summary
                         self._update_history(user_text, history_summary)
+
+                    elif kind == "route":
+                        # Inter-agent routing: forward the payload to another
+                        # registered pipeline or agent process.
+                        # meta must include: target_kind, target_node, and
+                        # the message to forward as meta.payload.
+                        target_kind = meta.get("target_kind", "pipeline")
+                        target_node = int(meta.get("target_node", 1))
+                        payload = meta.get("payload") or {}
+                        ok = self._registry.route_to(target_kind, target_node, payload)
+                        write_outbox({
+                            "ts": int(time.time()),
+                            "type": "pipeline_report",
+                            "request_id": req_id,
+                            "success": ok,
+                            "content": (
+                                f"Routed to {target_kind}:{target_node}."
+                                if ok else
+                                f"No live {target_kind}:{target_node} found in registry."
+                            ),
+                            "pipeline_build": PIPELINE_BUILD,
+                        })
+
+                    elif kind == "list_peers":
+                        # Discovery: return all currently-running registered processes.
+                        peers = self._registry.list_peers()
+                        write_outbox({
+                            "ts": int(time.time()),
+                            "type": "pipeline_report",
+                            "request_id": req_id,
+                            "success": True,
+                            "content": f"{len(peers)} peer(s) registered.",
+                            "peers": peers,
+                            "pipeline_build": PIPELINE_BUILD,
+                        })
 
                     elif kind == "health_check":
                         # Lightweight ping — no LLM involved, just confirm we're alive

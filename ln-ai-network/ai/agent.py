@@ -37,6 +37,7 @@ from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from ai.command_queue import read_new, write_outbox
+from ai.core.registry import AgentRegistry
 from ai.llm.base import LLMRequest
 from ai.llm.factory import create_backend
 from ai.mcp_client import FastMCPClientWrapper, MCPClient
@@ -148,6 +149,15 @@ class LightningAgent:
         lock_path = repo_root / "runtime" / "agent" / "agent.lock"
         self._lock = StartupLock(lock_path, name="agent")
         self._lock.acquire_or_exit()
+
+        # Agent registry — register this process and clean up stale entries.
+        self._registry = AgentRegistry(_repo_root() / "runtime" / "registry.jsonl")
+        self._registry.purge_stale()
+        self._node = _env_int("NODE_NUMBER", 1)
+        self._registry.register(
+            "agent", node=self._node,
+            inbox_path=_runtime_agent_dir() / "inbox.jsonl",
+        )
 
         # MCP connection: FastMCPClientWrapper wraps the synchronous MCP client
         # so it can be called without async/await from a synchronous agent loop.

@@ -1052,6 +1052,111 @@ button:active { transform: translateY(0); }
   scrollbar-color: var(--line-strong) var(--surface-2);
 }
 
+/* ── Archive filters ──
+   Sits between the archive panel header and the archive list.
+   Stacks the search input and filter pills vertically with a small gap.    */
+.archive-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.archive-search-input {
+  width: 100%;
+  padding: 7px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  transition: border-color 0.2s;
+}
+
+.archive-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.archive-search-input::placeholder {
+  color: var(--muted);
+}
+
+/* Filter pill row — horizontally scrollable on very narrow widths */
+.archive-status-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Filter pill buttons — smaller than the main button base style */
+.arch-filter-btn {
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--surface-3);
+  color: var(--muted);
+  border: 1px solid var(--line-strong);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.arch-filter-btn:hover {
+  opacity: 1;
+  transform: none;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+
+.arch-filter-btn.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: rgba(247,169,34,0.4);
+}
+
+/* ── Metrics card ──
+   Grid of stat tiles; each tile shows a value + label pair.               */
+.metrics-card {}
+
+.metrics-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.metric-tile {
+  flex: 1 1 80px;
+  min-width: 80px;
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+
+.metric-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--ink);
+  line-height: 1.1;
+  margin-bottom: 4px;
+}
+
+.metric-value.metric-ok      { color: var(--accent-2); }
+.metric-value.metric-partial { color: var(--accent); }
+.metric-value.metric-fail    { color: var(--danger); }
+
+.metric-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 /* ── Responsive ──
    960px: collapse side-by-side grids to single column
    600px: stack status bar vertically, reduce top padding                   */

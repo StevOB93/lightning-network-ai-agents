@@ -1,4 +1,4 @@
-"""Tests for LLM backend adapters: OpenAI and Gemini.
+"""Tests for LLM backend adapters: OpenAI, Gemini, and Ollama.
 
 Strategy:
   - All external HTTP/SDK calls are patched with unittest.mock.
@@ -443,3 +443,173 @@ class TestGeminiBackend:
         system_instruction, contents = self._gmod._openai_messages_to_gemini(messages)
         # user message + tool result (also user-role in Gemini)
         assert len(contents) == 2
+
+
+# =============================================================================
+# Ollama backend tests
+# =============================================================================
+
+class TestOllamaBackend:
+    """Tests for ai.llm.adapters.ollama_backend.OllamaBackend.
+
+    All HTTP calls are patched via unittest.mock.patch so no real Ollama
+    server is required.
+    """
+
+    def _make_backend(self):
+        from ai.llm.adapters.ollama_backend import OllamaBackend
+        return OllamaBackend(base_url="http://fake-ollama:11434", model="test-model")
+
+    def _mock_response(self, status: int, body: Any) -> MagicMock:
+        """Build a fake requests.Response."""
+        resp = MagicMock()
+        resp.status_code = status
+        resp.json.return_value = body
+        resp.text = str(body)
+        return resp
+
+    # ---------- Structured tool_calls in response ----------------------------
+
+    def test_structured_tool_call(self):
+        """Ollama returns structured tool_calls → LLMResponse(type='tool_call')."""
+        backend = self._make_backend()
+        body = {
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"function": {"name": "ln_getinfo", "arguments": {"node": 1}}}
+                ],
+            },
+            "prompt_eval_count": 10,
+            "eval_count": 5,
+        }
+        with patch("requests.post", return_value=self._mock_response(200, body)):
+            result = backend.step(_make_request())
+        assert result.type == "tool_call"
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].name == "ln_getinfo"
+        assert result.tool_calls[0].args == {"node": 1}
+        assert result.usage.prompt_tokens == 10
+        assert result.usage.output_tokens == 5
+
+    def test_structured_tool_call_args_as_json_string(self):
+        """arguments as a JSON string (some Ollama versions) are decoded."""
+        backend = self._make_backend()
+        body = {
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"function": {"name": "ln_listfunds", "arguments": '{"node": 2}'}}
+                ],
+            },
+        }
+        with patch("requests.post", return_value=self._mock_response(200, body)):
+            result = backend.step(_make_request())
+        assert result.type == "tool_call"
+        assert result.tool_calls[0].args == {"node": 2}
+
+    # ---------- Fallback text tool call parsing ------------------------------
+
+    def test_text_fallback_json_object_form(self):
+        """Content with JSON {"tool": ..., "args": {...}} is parsed as tool call."""
+        from ai.llm.adapters.ollama_backend import OllamaBackend
+        backend = self._make_backend()
+        body = {
+            "message": {
+                "role": "assistant",
+                "content": '{"tool": "ln_getinfo", "args": {"node": 1}}',
+                "tool_calls": [],
+            },
+        }
+        tools = [{"type": "function", "function": {"name": "ln_getinfo"}}]
+        with patch("requests.post", return_value=self._mock_response(200, body)):
+            result = backend.step(_make_request(tools=tools))
+        assert result.type == "tool_call"
+        assert result.tool_calls[0].name == "ln_getinfo"
+
+    def test_text_fallback_unknown_tool_name_is_final(self):
+        """Text that parses as a tool call but name not in schema → final response."""
+        backend = self._make_backend()
+        body = {
+            "message": {
+                "role": "assistant",
+                "content": '{"tool": "hallucinated_tool", "args": {}}',
+                "tool_calls": [],
+            },
+        }
+        tools = [{"type": "function", "function": {"name": "ln_getinfo"}}]
+        with patch("requests.post", return_value=self._mock_response(200, body)):
+            result = backend.step(_make_request(tools=tools))
+        assert result.type == "final"
+
+    # ---------- Plain text final response ------------------------------------
+
+    def test_plain_text_response(self):
+        """No tool_calls and content not parseable as tool → final text response."""
+        backend = self._make_backend()
+        body = {"message": {"role": "assistant", "content": "Node 1 is online."}}
+        with patch("requests.post", return_value=self._mock_response(200, body)):
+            result = backend.step(_make_request())
+        assert result.type == "final"
+        assert result.content == "Node 1 is online."
+
+    def test_missing_usage_fields_returns_none_usage(self):
+        """Older Ollama versions omit eval_count fields → usage is None."""
+        backend = self._make_backend()
+        body = {"message": {"role": "assistant", "content": "hi"}}
+        with patch("requests.post", return_value=self._mock_response(200, body)):
+            result = backend.step(_make_request())
+        assert result.usage is None
+
+    # ---------- Error mapping ------------------------------------------------
+
+    def test_5xx_raises_transient_error(self):
+        backend = self._make_backend()
+        with patch("requests.post", return_value=self._mock_response(503, "unavailable")):
+            with pytest.raises(TransientAPIError):
+                backend.step(_make_request())
+
+    def test_4xx_raises_permanent_error(self):
+        backend = self._make_backend()
+        with patch("requests.post", return_value=self._mock_response(400, "bad request")):
+            with pytest.raises(PermanentAPIError):
+                backend.step(_make_request())
+
+    def test_connection_error_raises_transient(self):
+        """requests.RequestException (timeout, connection refused) → TransientAPIError."""
+        import requests as req_lib
+        backend = self._make_backend()
+        with patch("requests.post", side_effect=req_lib.ConnectionError("refused")):
+            with pytest.raises(TransientAPIError):
+                backend.step(_make_request())
+
+    # ---------- _try_parse_single_tool_call ----------------------------------
+
+    def test_parse_function_call_form(self):
+        """tool_name({"key": value}) form is parsed."""
+        from ai.llm.adapters.ollama_backend import _try_parse_single_tool_call
+        result = _try_parse_single_tool_call('ln_pay({"bolt11": "lnbc100"})')
+        assert result == ("ln_pay", {"bolt11": "lnbc100"})
+
+    def test_parse_kwargs_form(self):
+        """tool_name(key=val, key=val) form is parsed."""
+        from ai.llm.adapters.ollama_backend import _try_parse_single_tool_call
+        result = _try_parse_single_tool_call("ln_getinfo(node=1)")
+        assert result == ("ln_getinfo", {"node": 1})
+
+    def test_parse_space_form(self):
+        """tool_name key=val key=val (space-separated) form is parsed."""
+        from ai.llm.adapters.ollama_backend import _try_parse_single_tool_call
+        result = _try_parse_single_tool_call("ln_getinfo node=1")
+        assert result == ("ln_getinfo", {"node": 1})
+
+    def test_parse_returns_none_for_plain_text(self):
+        """Plain text with no tool-call pattern returns None."""
+        from ai.llm.adapters.ollama_backend import _try_parse_single_tool_call
+        assert _try_parse_single_tool_call("The node is online.") is None
+
+    def test_parse_empty_string(self):
+        from ai.llm.adapters.ollama_backend import _try_parse_single_tool_call
+        assert _try_parse_single_tool_call("") is None

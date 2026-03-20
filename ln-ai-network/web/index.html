@@ -125,6 +125,14 @@
         <pre class="summary-body" id="summary-body"></pre>
       </section>
 
+      <!-- Metrics card: aggregate stats over all past queries -->
+      <section class="card metrics-card" id="metrics-card">
+        <div class="card-header"><h2>Query Metrics</h2></div>
+        <div id="metrics-content" class="metrics-grid">
+          <div class="empty-state">No queries yet.</div>
+        </div>
+      </section>
+
     </div><!-- /tab-agent -->
 
     <!-- ── Tab: Pipeline ── stage-by-stage breakdown ── -->
@@ -240,6 +248,16 @@
               <span class="archive-panel-title">Past Queries</span>
               <!-- Re-fetches /api/logs and re-renders the list -->
               <button id="archive-refresh-btn" class="btn-ghost small">↻</button>
+            </div>
+            <!-- Search bar and status filter pills -->
+            <div class="archive-filters">
+              <input id="archive-search" type="text" placeholder="Search queries…" class="archive-search-input">
+              <div class="archive-status-filters">
+                <button class="arch-filter-btn active" data-status="">All</button>
+                <button class="arch-filter-btn" data-status="ok">ok</button>
+                <button class="arch-filter-btn" data-status="partial">partial</button>
+                <button class="arch-filter-btn" data-status="failed">failed</button>
+              </div>
             </div>
             <!-- Archive entries rendered by renderArchiveList() in app.js -->
             <!-- Clicking an entry fetches /api/logs/{filename} and expands inline trace -->

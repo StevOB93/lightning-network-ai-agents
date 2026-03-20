@@ -79,7 +79,7 @@ def _read_trace_tail(limit: int = 150) -> list[dict[str, Any]]:
     return _read_jsonl_tail(RUNTIME_DIR / "trace.log", limit=limit)
 
 
-def _list_archives() -> list[dict[str, Any]]:
+def _list_archives(q: str = "", status: str = "") -> list[dict[str, Any]]:
     """
     Return metadata for all archived query traces, sorted newest-first.
 
@@ -90,6 +90,10 @@ def _list_archives() -> list[dict[str, Any]]:
 
     Files that don't match the three-part naming convention are silently skipped
     (they might be temp files or manually placed files).
+
+    Optional filters:
+      q      — case-insensitive keyword match against user_text_preview
+      status — exact match against the status field ("ok", "partial", "failed")
     """
     logs_dir = RUNTIME_DIR / "logs"
     if not logs_dir.exists():
@@ -101,7 +105,10 @@ def _list_archives() -> list[dict[str, Any]]:
         parts = p.stem.split("_", 2)  # Split at most twice: req_id, datetime, status
         if len(parts) != 3:
             continue  # Skip non-conforming filenames
-        req_id_str, dt_str, status = parts
+        req_id_str, dt_str, file_status = parts
+        # Apply status filter before reading file contents (fast path)
+        if status and file_status != status:
+            continue
         user_text = ""
         try:
             # Read only the first line (the prompt_start header) to get user_text.
@@ -111,15 +118,99 @@ def _list_archives() -> list[dict[str, Any]]:
             user_text = json.loads(first_line).get("user_text", "")
         except Exception:
             pass  # Missing or malformed header — preview stays empty
+        # Apply keyword filter after reading user_text (case-insensitive)
+        if q and q.lower() not in user_text.lower():
+            continue
         results.append({
             "filename": p.name,
             "req_id": int(req_id_str) if req_id_str.isdigit() else 0,
-            "datetime": dt_str,          # Raw string e.g. "20260319-143022"
-            "status": status,            # "ok" | "failed" | "partial"
+            "datetime": dt_str,               # Raw string e.g. "20260319-143022"
+            "status": file_status,            # "ok" | "failed" | "partial"
             "size_bytes": p.stat().st_size,
             "user_text_preview": user_text[:120],  # Truncated for the list view
         })
     return results
+
+
+def _compute_metrics() -> dict[str, Any]:
+    """
+    Compute aggregate metrics over all archived query traces.
+
+    Reads every JSONL file in runtime/agent/logs/ and aggregates:
+      total_queries       — count of conforming archive files
+      status_counts       — {"ok": N, "partial": N, "failed": N}
+      success_rate        — float 0-1 (ok / total_queries, 0 if no queries)
+      stage_failure_counts— dict of stage names → count of failures
+                            parsed from "stage_failed" events inside each file
+      avg_duration_s      — average query duration in seconds (first ts to last ts);
+                            None if no files have timestamp data
+
+    Reading every archive file on each request is fine because the logs
+    directory is expected to stay small (one file per completed query).
+    """
+    logs_dir = RUNTIME_DIR / "logs"
+    if not logs_dir.exists():
+        return {
+            "total_queries": 0,
+            "status_counts": {"ok": 0, "partial": 0, "failed": 0},
+            "success_rate": 0.0,
+            "stage_failure_counts": {},
+            "avg_duration_s": None,
+        }
+
+    status_counts: dict[str, int] = {"ok": 0, "partial": 0, "failed": 0}
+    stage_failure_counts: dict[str, int] = {}
+    durations: list[float] = []
+    total = 0
+
+    for p in logs_dir.glob("*.jsonl"):
+        parts = p.stem.split("_", 2)
+        if len(parts) != 3:
+            continue  # Skip non-conforming filenames
+        _, _, file_status = parts
+        total += 1
+        # Tally status — unknown statuses go into whichever bucket matches, or ignored
+        if file_status in status_counts:
+            status_counts[file_status] += 1
+
+        # Read the file to gather stage_failed events and timestamps
+        timestamps: list[float] = []
+        try:
+            lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                # Collect timestamps for duration calculation
+                ts = ev.get("ts")
+                if isinstance(ts, (int, float)) and ts > 0:
+                    timestamps.append(float(ts))
+                # Count stage failures — look for stage_failed field
+                stage = ev.get("stage_failed")
+                if stage and isinstance(stage, str):
+                    stage_failure_counts[stage] = stage_failure_counts.get(stage, 0) + 1
+        except Exception:
+            pass  # Unreadable file — skip it
+
+        if len(timestamps) >= 2:
+            durations.append(max(timestamps) - min(timestamps))
+
+    success_rate = (status_counts.get("ok", 0) / total) if total > 0 else 0.0
+    avg_duration_s = (sum(durations) / len(durations)) if durations else None
+
+    return {
+        "total_queries": total,
+        "status_counts": status_counts,
+        "success_rate": success_rate,
+        "stage_failure_counts": stage_failure_counts,
+        "avg_duration_s": avg_duration_s,
+    }
 
 
 def _read_archive(filename: str) -> dict[str, Any] | None:
@@ -419,7 +510,10 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, _extract_network_data())
         elif route == "/api/logs":
             # Archive list — metadata only, no event content
-            self._json(HTTPStatus.OK, _list_archives())
+            qs = parse_qs(parsed.query)
+            q_param = qs.get("q", [""])[0]
+            status_param = qs.get("status", [""])[0]
+            self._json(HTTPStatus.OK, _list_archives(q=q_param, status=status_param))
         elif route.startswith("/api/logs/"):
             # Individual archive file — full event list
             filename = route[len("/api/logs/"):]
@@ -428,6 +522,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "Archive not found"})
             else:
                 self._json(HTTPStatus.OK, result)
+        elif route == "/api/metrics":
+            self._json(HTTPStatus.OK, _compute_metrics())
         elif route == "/api/stream":
             self._sse_stream()
         else:

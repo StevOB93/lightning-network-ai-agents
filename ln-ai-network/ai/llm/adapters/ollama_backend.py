@@ -48,14 +48,7 @@ from ai.llm.base import (
     TransientAPIError,
     PermanentAPIError,
 )
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    """Read a boolean env var. Truthy: 1, true, yes, on (case-insensitive)."""
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
+from ai.utils import _env_bool
 
 
 # ---------------------------------------------------------------------------

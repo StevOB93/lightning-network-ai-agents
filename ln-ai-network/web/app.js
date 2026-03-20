@@ -447,14 +447,73 @@ function renderArchiveList(entries) {
  * Fetch the archive list from /api/logs and render it.
  * Called when the archive panel is opened and when a pipeline_result SSE
  * arrives while the panel is open (auto-refresh).
+ *
+ * Reads the current search input value and active status filter pill, then
+ * passes them as query params to the server for server-side filtering.
  */
 async function fetchAndRenderArchiveList() {
   try {
-    const res = await fetch("/api/logs");
+    const searchEl = $("archive-search");
+    const q = searchEl ? searchEl.value.trim() : "";
+    const activeBtn = document.querySelector(".arch-filter-btn.active");
+    const status = activeBtn ? (activeBtn.dataset.status || "") : "";
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    const url = "/api/logs" + (params.toString() ? "?" + params.toString() : "");
+    const res = await fetch(url);
     const entries = await res.json();
     renderArchiveList(entries);
   } catch (_) {
     archiveList.innerHTML = '<div class="empty-state">Failed to load archive.</div>';
+  }
+}
+
+/**
+ * Fetch aggregate query metrics from /api/metrics and render stat tiles.
+ * Called on page load and when a pipeline_result SSE event arrives.
+ */
+async function fetchAndRenderMetrics() {
+  const metricsContent = $("metrics-content");
+  if (!metricsContent) return;
+  try {
+    const res = await fetch("/api/metrics");
+    const m = await res.json();
+    if (m.total_queries === 0) {
+      metricsContent.innerHTML = '<div class="empty-state">No queries yet.</div>';
+      return;
+    }
+    const successPct = (m.success_rate * 100).toFixed(1);
+    const avgDur = m.avg_duration_s != null ? m.avg_duration_s.toFixed(2) + "s" : "—";
+    const sc = m.status_counts || {};
+    metricsContent.innerHTML = `
+      <div class="metric-tile">
+        <div class="metric-value">${m.total_queries}</div>
+        <div class="metric-label">Total Queries</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value metric-ok">${successPct}%</div>
+        <div class="metric-label">Success Rate</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value metric-ok">${sc.ok ?? 0}</div>
+        <div class="metric-label">ok</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value metric-partial">${sc.partial ?? 0}</div>
+        <div class="metric-label">partial</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value metric-fail">${sc.failed ?? 0}</div>
+        <div class="metric-label">failed</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value">${avgDur}</div>
+        <div class="metric-label">Avg Duration</div>
+      </div>
+    `;
+  } catch (_) {
+    if (metricsContent) metricsContent.innerHTML = '<div class="empty-state">Failed to load metrics.</div>';
   }
 }
 
@@ -826,6 +885,8 @@ function startSSE() {
       // This ensures newly archived entries appear without the user needing to
       // manually click the refresh button.
       if (!archivePanel.hasAttribute("hidden")) fetchAndRenderArchiveList().catch(() => {});
+      // Always refresh metrics when a new pipeline result arrives
+      fetchAndRenderMetrics().catch(() => {});
     } catch (_) {}
   });
 
@@ -882,6 +943,9 @@ initTabs();
 // Load initial data immediately so the UI isn't blank on first render.
 // Any fetch error is shown in the action log (non-blocking).
 refreshAll().catch(e => setLog(e.message, true));
+
+// Load metrics on page load
+fetchAndRenderMetrics().catch(() => {});
 
 // Open the SSE stream for live updates.
 startSSE();
@@ -964,6 +1028,20 @@ archiveToggleBtn.addEventListener("click", async () => {
 $("archive-refresh-btn").addEventListener("click", () =>
   fetchAndRenderArchiveList().catch(() => {})
 );
+
+// Archive search input — re-fetch filtered list as the user types
+$("archive-search").addEventListener("input", () =>
+  fetchAndRenderArchiveList().catch(() => {})
+);
+
+// Archive status filter pills — one active at a time; re-fetch on click
+document.addEventListener("click", e => {
+  const btn = e.target.closest(".arch-filter-btn");
+  if (!btn) return;
+  document.querySelectorAll(".arch-filter-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  fetchAndRenderArchiveList().catch(() => {});
+});
 
 /**
  * Click-to-expand archive entries.

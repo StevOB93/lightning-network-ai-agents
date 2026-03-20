@@ -22,6 +22,7 @@ from __future__ import annotations
 # =============================================================================
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
@@ -96,12 +97,21 @@ class FastMCPClientWrapper:
 
     This wrapper bridges the two by unpacking the args dict as kwargs before
     passing through to the underlying client.
+
+    Thread safety: a per-instance Lock serialises concurrent calls through the
+    underlying FastMCPClient, which uses a single connection and is not designed
+    for concurrent access. This makes FastMCPClientWrapper safe to use with
+    EXECUTOR_MAX_WORKERS > 1, at the cost of serialising all tool calls (i.e.
+    parallel plan steps wait on each other at the MCP boundary). For true
+    parallelism, replace this with a connection-pooled client.
     """
 
     def __init__(self, fast_mcp_client: Any) -> None:
         self._client = fast_mcp_client
+        self._lock = threading.Lock()
 
     def call(self, tool: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         args = args or {}
-        # Spread the args dict as keyword arguments to match FastMCPClient's signature
-        return self._client.call(tool, **args)
+        with self._lock:
+            # Spread the args dict as keyword arguments to match FastMCPClient's signature
+            return self._client.call(tool, **args)
