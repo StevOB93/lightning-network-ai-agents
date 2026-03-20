@@ -1,8 +1,20 @@
 """
 Tests for ai/controllers/planner.py
 
-Uses a MockLLMBackend that returns preset LLMResponse objects.
-No real LLM or network calls are made.
+Strategy:
+  - MockLLMBackend returns preset LLMResponse objects from a queue.
+  - _NullTrace discards all events (no file I/O in tests).
+  - No real LLM API calls or network connections are made.
+
+Test groups:
+  Happy path    — valid JSON responses produce correct ExecutionPlan fields.
+  Retry         — bad JSON on first attempt triggers retry; exhausted retries raise PlannerError.
+  Validation    — unknown tools, missing required args, duplicate step_ids, invalid on_error
+                  all exhaust retries and raise PlannerError.
+
+Note on placeholder args: steps may contain "$step1.result.payload.X" references as args.
+The Planner validates tool names and required args but treats "$..." values as valid
+placeholders — the Executor resolves them at runtime.
 """
 from __future__ import annotations
 

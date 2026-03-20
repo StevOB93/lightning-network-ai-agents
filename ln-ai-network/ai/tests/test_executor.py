@@ -1,8 +1,17 @@
 """
 Tests for ai/controllers/executor.py
 
-Uses a MockMCPClient that returns preset results.
-No real MCP, LLM, or network calls are made.
+Strategy:
+  - MockMCPClient returns preset results from a queue and records all calls.
+  - _NullTrace discards all events (no file I/O in tests).
+  - No real MCP, LLM, or network connections are made.
+
+Test groups:
+  Happy path            — successful tool calls produce correct StepResult fields.
+  Error policies        — on_error="abort" raises ExecutorError; "skip" marks result skipped.
+  Retry behavior        — on_error="retry" re-calls MCP up to max_retries times.
+  Placeholder resolution — "$stepN.result.payload.key" is resolved from prior step raw_result.
+  Args normalization    — _normalize_tool_args coerces node="1" to node=1 before MCP call.
 """
 from __future__ import annotations
 
@@ -245,3 +254,117 @@ def test_int_coercion_applied():
     e.execute(_make_plan([step]), req_id=14)
     _, call_args = e.mcp.calls[0]  # type: ignore[attr-defined]
     assert call_args["node"] == 1
+
+
+# =============================================================================
+# Topological sort / depends_on enforcement
+# =============================================================================
+
+def test_depends_on_reorders_steps():
+    """Steps provided out of order are sorted by depends_on before execution."""
+    from ai.controllers.executor import _topological_sort
+    step1 = _make_step(1, "ln_getinfo")
+    step2 = _make_step(2, "ln_listfunds", depends_on=[1])
+    # Provide in reverse order — sort should fix this
+    ordered = _topological_sort([step2, step1])
+    assert [s.step_id for s in ordered] == [1, 2]
+
+
+def test_depends_on_multi_level():
+    """Three-step chain: 3 depends on 2, 2 depends on 1."""
+    from ai.controllers.executor import _topological_sort
+    step1 = _make_step(1)
+    step2 = _make_step(2, depends_on=[1])
+    step3 = _make_step(3, depends_on=[2])
+    ordered = _topological_sort([step3, step1, step2])
+    assert [s.step_id for s in ordered] == [1, 2, 3]
+
+
+def test_depends_on_circular_raises():
+    """Circular dependency raises ValueError."""
+    from ai.controllers.executor import _topological_sort
+    step1 = _make_step(1, depends_on=[2])
+    step2 = _make_step(2, depends_on=[1])
+    with pytest.raises(ValueError, match="Circular"):
+        _topological_sort([step1, step2])
+
+
+def test_depends_on_unknown_step_raises():
+    """Reference to a non-existent step_id raises ValueError."""
+    from ai.controllers.executor import _topological_sort
+    step1 = _make_step(1, depends_on=[99])
+    with pytest.raises(ValueError, match="Unknown step_id"):
+        _topological_sort([step1])
+
+
+def test_execute_invalid_dependency_graph_raises_executor_error():
+    """Circular dependency at execute() time raises ExecutorError (not ValueError)."""
+    e = _make_executor([])
+    step1 = _make_step(1, depends_on=[2])
+    step2 = _make_step(2, depends_on=[1])
+    with pytest.raises(ExecutorError, match="Invalid plan dependency graph"):
+        e.execute(_make_plan([step1, step2]), req_id=15)
+
+
+# =============================================================================
+# _compute_levels and parallel execution
+# =============================================================================
+
+def test_compute_levels_no_deps():
+    """Steps with no dependencies all land in wave 0."""
+    from ai.controllers.executor import _compute_levels
+    steps = [_make_step(1), _make_step(2), _make_step(3)]
+    levels = _compute_levels(steps)
+    assert len(levels) == 1
+    assert {s.step_id for s in levels[0]} == {1, 2, 3}
+
+
+def test_compute_levels_chain():
+    """A linear chain produces one step per wave."""
+    from ai.controllers.executor import _compute_levels
+    step1 = _make_step(1)
+    step2 = _make_step(2, depends_on=[1])
+    step3 = _make_step(3, depends_on=[2])
+    levels = _compute_levels([step1, step2, step3])
+    assert len(levels) == 3
+    assert levels[0][0].step_id == 1
+    assert levels[1][0].step_id == 2
+    assert levels[2][0].step_id == 3
+
+
+def test_compute_levels_diamond():
+    """Diamond: step1 → {step2, step3} → step4."""
+    from ai.controllers.executor import _compute_levels
+    step1 = _make_step(1)
+    step2 = _make_step(2, depends_on=[1])
+    step3 = _make_step(3, depends_on=[1])
+    step4 = _make_step(4, depends_on=[2, 3])
+    levels = _compute_levels([step1, step2, step3, step4])
+    assert len(levels) == 3
+    assert levels[0][0].step_id == 1
+    assert {s.step_id for s in levels[1]} == {2, 3}
+    assert levels[2][0].step_id == 4
+
+
+def test_parallel_execution_independent_steps():
+    """Steps with no depends_on run in parallel; both MCP calls are made."""
+    step1 = _make_step(1, "ln_getinfo", {"node": 1})
+    step2 = _make_step(2, "ln_listfunds", {"node": 2})
+    # Two responses, one per step
+    e = Executor(ExecutorConfig(max_workers=2), MockMCPClient([_ok_result(), _ok_result()]), _NullTrace())
+    results = e.execute(_make_plan([step1, step2]), req_id=16)
+    assert len(results) == 2
+    assert all(r.ok for r in results)
+    assert {r.step_id for r in results} == {1, 2}
+
+
+def test_parallel_wave_both_results_collected_before_failure_check():
+    """Both steps in a wave execute before the failure is raised (wave semantics)."""
+    step1 = _make_step(1, on_error="abort")
+    step2 = _make_step(2, on_error="abort")
+    # step1 fails, step2 succeeds — with parallel execution both run before the check
+    e = Executor(ExecutorConfig(max_workers=2), MockMCPClient([_err_result(), _ok_result()]), _NullTrace())
+    with pytest.raises(ExecutorError):
+        e.execute(_make_plan([step1, step2]), req_id=17)
+    # Both were called (parallel wave ran to completion before failure raised)
+    assert len(e.mcp.calls) == 2  # type: ignore[attr-defined]

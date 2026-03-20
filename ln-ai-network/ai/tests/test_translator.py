@@ -1,8 +1,15 @@
 """
 Tests for ai/controllers/translator.py
 
-Uses a MockLLMBackend that returns preset LLMResponse objects.
-No real LLM or network calls are made.
+Strategy:
+  - MockLLMBackend returns preset LLMResponse objects from a queue.
+  - _NullTrace discards all events (no file I/O in tests).
+  - No real LLM API calls or network connections are made.
+
+Test groups:
+  Happy path    — valid JSON responses produce correct IntentBlock fields.
+  Retry         — bad JSON on first attempt triggers retry; exhausted retries raise TranslatorError.
+  Validation    — missing/invalid fields exhaust retries and raise TranslatorError.
 """
 from __future__ import annotations
 

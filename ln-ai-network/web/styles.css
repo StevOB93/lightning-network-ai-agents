@@ -1,4 +1,24 @@
-/* Lightning Agent UI — styles.css */
+/* =============================================================================
+   Lightning Agent UI — styles.css
+
+   Design system:
+     :root        — design tokens (colors, radii, shadow)
+     Typography   — Space Grotesk (UI) + IBM Plex Mono (code/trace)
+     Layout       — .page-shell (max 1280px centered column)
+     Components   — .card, .status-bar, .tab-bar, .tab-panel, buttons
+     Feature CSS  — pipeline stages, trace log, archive panel, network viz
+     Responsive   — breakpoints at 960px and 600px
+
+   Color naming:
+     --bg / --surface / --surface-2 / --surface-3  — dark layered backgrounds
+     --ink / --ink-2 / --muted                      — text hierarchy
+     --line / --line-strong                          — subtle borders
+     --accent (#f7a922 amber)                        — primary brand color
+     --accent-2 (#22c55e green)                      — success/online state
+     --danger (#ef4444 red)                          — errors/offline
+     --info (#38bdf8 sky)                            — informational tags
+     --purple                                        — type tags
+   ============================================================================= */
 
 /* ── Design tokens ── */
 :root {
@@ -37,7 +57,10 @@ code, pre, .mono {
   font-family: "IBM Plex Mono", monospace;
 }
 
-/* ── Layout shell ── */
+/* ── Layout shell ──
+   Centered column with a max-width cap. The calc ensures 12px breathing room
+   on each side on narrow viewports without a hard min-width constraint.
+   gap: 16px creates uniform spacing between all top-level sections.        */
 .page-shell {
   width: min(1280px, calc(100vw - 24px));
   margin: 0 auto;
@@ -47,7 +70,9 @@ code, pre, .mono {
   gap: 16px;
 }
 
-/* ── Card base ── */
+/* ── Card base ──
+   All content areas use this as their foundation. Padding 20px/24px gives a
+   comfortable reading gutter. The box-shadow lifts cards off the dark bg.   */
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -77,7 +102,9 @@ code, pre, .mono {
   gap: 10px;
 }
 
-/* ── Status bar ── */
+/* ── Status bar ──
+   Persistent top strip visible on all tabs. flex-wrap allows the indicators
+   to stack on narrow screens without overflowing.                           */
 .status-bar {
   display: flex;
   align-items: center;
@@ -128,6 +155,8 @@ code, pre, .mono {
   gap: 6px;
 }
 
+/* Agent online dot — default state is offline red.
+   .indicator.online class added by app.js triggers the green pulse.        */
 .dot {
   width: 8px;
   height: 8px;
@@ -143,6 +172,7 @@ code, pre, .mono {
   animation: pulse 2s infinite;
 }
 
+/* Ripple animation: the box-shadow expands and fades to create a halo effect */
 @keyframes pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
   50%       { box-shadow: 0 0 0 5px rgba(34, 197, 94, 0);  }
@@ -158,7 +188,60 @@ code, pre, .mono {
   color: var(--ink-2);
 }
 
-/* ── Prompt hero ── */
+/* ── Tab bar ──
+   Pill-style tabs inside a container card. The active tab uses surface-3 to
+   appear recessed relative to the surrounding surface background.           */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 6px;
+}
+
+.tab-btn {
+  flex: 1;
+  border-radius: calc(var(--radius) - 4px);
+  padding: 9px 16px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tab-btn:hover {
+  opacity: 1;
+  transform: none;
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+
+.tab-btn.active {
+  background: var(--surface-3);
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+/* ── Tab panels ──
+   Only one panel visible at a time. app.js toggles the `hidden` attribute
+   rather than display:none to preserve scroll position in hidden panels.    */
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.tab-panel[hidden] {
+  display: none;
+}
+
+/* ── Prompt hero ──
+   Two-column grid: left = descriptive copy, right = textarea + action row.
+   gradient background distinguishes it as the primary action area.         */
 .prompt-hero {
   display: grid;
   grid-template-columns: 1fr 1.6fr;
@@ -232,7 +315,10 @@ textarea::placeholder {
   border-color: rgba(239,68,68,0.3);
 }
 
-/* ── Buttons ── */
+/* ── Buttons ──
+   Base: border-radius 999px (pill shape), flex for icon+text alignment.
+   Hover: slight upward lift + opacity fade; active: drop back down.
+   .btn-ghost.small: smaller padding for secondary card-level actions.      */
 button {
   border: 0;
   border-radius: 999px;
@@ -273,7 +359,12 @@ button:active { transform: translateY(0); }
 
 .btn-icon { font-size: 0.9rem; }
 
-/* ── Pipeline stages ── */
+/* ── Pipeline stages ──
+   3-column grid. stage-card border color responds to pipeline result status:
+     .ok   → green left accent
+     .fail → red left accent
+     .skip → muted (step was skipped)
+   The transition allows the border to animate in when status arrives.      */
 .pipeline-stages {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -292,6 +383,7 @@ button:active { transform: translateY(0); }
   box-shadow: var(--shadow);
   padding: 18px 20px;
   transition: border-color 0.3s;
+  position: relative;
 }
 
 .stage-card.ok   { border-color: rgba(34,197,94,0.4); }
@@ -305,6 +397,7 @@ button:active { transform: translateY(0); }
   margin-bottom: 14px;
 }
 
+/* Circular step number badge — uses flex centering for the single digit */
 .stage-num {
   width: 28px;
   height: 28px;
@@ -329,6 +422,7 @@ button:active { transform: translateY(0); }
   color: var(--muted);
 }
 
+/* Stage badge: pill that shows ok/fail/running/— with semantic color */
 .stage-badge {
   margin-left: auto;
   font-size: 0.72rem;
@@ -362,6 +456,8 @@ button:active { transform: translateY(0); }
   margin-bottom: 8px;
 }
 
+/* Pill tags used throughout — each color variant maps to a semantic meaning:
+   blue=info, orange=action, purple=type, green=success, gray=neutral, teal=special */
 .tag {
   font-size: 0.72rem;
   font-weight: 700;
@@ -390,6 +486,7 @@ button:active { transform: translateY(0); }
   font-size: 0.83rem;
 }
 
+/* Two-column table for intent context fields (key → value pairs from IntentBlock) */
 .ctx-table {
   width: 100%;
   border-collapse: collapse;
@@ -418,6 +515,7 @@ button:active { transform: translateY(0); }
   font-size: 0.78rem;
 }
 
+/* Clarification block: shown when the intent has pending questions for the user */
 .clarif-block {
   margin-top: 8px;
   padding: 8px 12px;
@@ -431,6 +529,7 @@ button:active { transform: translateY(0); }
 .clarif-block ul { margin: 4px 0 0; padding-left: 16px; }
 
 /* ── Plan display ── */
+/* plan_rationale: displayed above the step list as a muted italic block */
 .rationale {
   font-size: 0.78rem;
   margin-bottom: 10px;
@@ -474,6 +573,7 @@ button:active { transform: translateY(0); }
   color: var(--muted);
 }
 
+/* Tool name pill uses accent amber to visually link to the planner stage color */
 .step-tool {
   font-size: 0.78rem;
   color: var(--accent);
@@ -482,6 +582,7 @@ button:active { transform: translateY(0); }
   border-radius: 5px;
 }
 
+/* on_error policy badge — color encodes severity: red=abort, amber=retry, gray=skip */
 .step-on-error {
   font-size: 0.68rem;
   padding: 1px 7px;
@@ -506,7 +607,10 @@ button:active { transform: translateY(0); }
   font-size: 0.75rem;
 }
 
-/* ── Executor display ── */
+/* ── Executor display ──
+   Left-border color indicates step result: green=ok, red=fail, gray=skipped.
+   .step-skipped uses opacity:0.7 to de-emphasize steps that were intentionally
+   skipped (on_error=skip) vs steps that actually failed.                   */
 .exec-steps {
   display: flex;
   flex-direction: column;
@@ -532,6 +636,7 @@ button:active { transform: translateY(0); }
   margin-bottom: 4px;
 }
 
+/* Status icon: ✓ / ✗ / ⊘ — colored to match the step's border */
 .exec-status-icon {
   font-size: 0.9rem;
   width: 16px;
@@ -542,6 +647,7 @@ button:active { transform: translateY(0); }
 .step-fail .exec-status-icon  { color: var(--danger); }
 .step-skipped .exec-status-icon { color: var(--muted); }
 
+/* Retry count badge — only shown when retries_used > 0 */
 .retry-badge {
   font-size: 0.68rem;
   padding: 1px 7px;
@@ -558,10 +664,13 @@ button:active { transform: translateY(0); }
   word-break: break-word;
 }
 
-/* ── Summary card ── */
+/* ── Summary card ──
+   Gradient background matches the prompt hero to create visual continuity.
+   summary-icon.ok/fail class applied by renderSummary() based on result.success. */
 .summary-card {
   background: linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%);
   border-color: var(--line-strong);
+  position: relative;
 }
 
 .summary-header {
@@ -590,6 +699,7 @@ button:active { transform: translateY(0); }
   color: var(--muted);
 }
 
+/* pre-wrap preserves the LLM's newlines in multi-sentence summaries */
 .summary-body {
   margin: 0;
   white-space: pre-wrap;
@@ -599,7 +709,10 @@ button:active { transform: translateY(0); }
   word-break: break-word;
 }
 
-/* ── Network visualization ── */
+/* ── Network visualization ──
+   D3 injects an SVG element into .network-viz. The SVG is set to 100% width
+   via CSS (not inline attributes) so it scales with the container.
+   The container uses overflow:hidden to clip the D3 canvas edges.          */
 .network-card {}
 
 .network-viz {
@@ -624,7 +737,9 @@ button:active { transform: translateY(0); }
   color: var(--muted);
 }
 
-/* ── Bottom grid ── */
+/* ── Bottom grid ── (Logs tab)
+   1.2fr : 1fr split gives the trace log card slightly more width than the
+   inbox/outbox queue panels, reflecting their relative importance.         */
 .bottom-grid {
   display: grid;
   grid-template-columns: 1.2fr 1fr;
@@ -632,13 +747,18 @@ button:active { transform: translateY(0); }
   align-items: start;
 }
 
-/* ── Trace log ── */
+/* ── Trace log card ──
+   max-height on the card prevents it from pushing other content off screen.
+   The inner .trace-log also has a max-height + overflow-y:auto so it scrolls
+   independently within the card.                                            */
 .trace-card {
   max-height: 420px;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
+/* "auto" badge indicates trace rows append automatically without user action */
 .auto-badge {
   font-size: 0.68rem;
   padding: 2px 8px;
@@ -659,10 +779,12 @@ button:active { transform: translateY(0); }
   padding-right: 4px;
 }
 
+/* Thin custom scrollbar — only visible in Webkit; Firefox uses scrollbar-width */
 .trace-log::-webkit-scrollbar { width: 4px; }
 .trace-log::-webkit-scrollbar-track { background: var(--surface-2); border-radius: 2px; }
 .trace-log::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 2px; }
 
+/* Individual trace event row: flex layout for ts | kind | detail columns */
 .trace-row {
   display: flex;
   align-items: baseline;
@@ -745,6 +867,8 @@ button:active { transform: translateY(0); }
 
 /* ── Helpers ── */
 .muted { color: var(--muted); }
+
+/* Centered placeholder shown when a panel has no data yet */
 .empty-state {
   color: var(--muted);
   font-size: 0.82rem;
@@ -752,7 +876,185 @@ button:active { transform: translateY(0); }
   padding: 24px 0;
 }
 
-/* ── Responsive ── */
+/* ── Copy button ──
+   Absolutely positioned within each card; initially transparent, revealed on
+   card hover. .stage-header > .copy-btn overrides position:absolute since
+   it sits inline in the header row instead.                                */
+.copy-btn {
+  position: absolute;
+  top: 56px;
+  right: 20px;
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+  z-index: 1;
+  line-height: 1.6;
+}
+
+.stage-header > .copy-btn { position: static; }
+.summary-card > .copy-btn { top: 20px; right: 24px; }
+.trace-card > .copy-btn { top: 52px; right: 24px; }
+
+/* Inline variant: used in stage headers where the button isn't absolutely placed */
+.copy-btn-inline {
+  position: static;
+  opacity: 1;
+  float: right;
+  margin-top: -2px;
+  margin-left: 6px;
+}
+
+/* Reveal copy button when hovering the parent card */
+.stage-card:hover .copy-btn,
+.summary-card:hover .copy-btn,
+.trace-card:hover .copy-btn { opacity: 1; }
+
+.copy-btn:hover { color: var(--ink); }
+/* .copied class applied briefly by app.js after clipboard write success */
+.copy-btn.copied { color: var(--accent-2); border-color: rgba(34,197,94,0.4); opacity: 1; }
+
+/* ── Clear button ──
+   Hidden until the card-header is hovered. Turns red on direct hover to
+   signal a destructive action (clears the DOM, not the file on disk).      */
+.clear-btn {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 0.68rem;
+  padding: 1px 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.card-header:hover .clear-btn { opacity: 0.7; }
+.clear-btn:hover { color: var(--danger); opacity: 1; }
+
+/* ── Archive panel ──
+   Sits inside .trace-card, below #trace-log. Hidden by default via the HTML
+   `hidden` attribute; app.js removes `hidden` on toggle-button click.
+   A border-top separator visually divides the live log from the archive.   */
+.archive-panel {
+  border-top: 1px solid var(--line-strong);
+  margin-top: 14px;
+  padding-top: 12px;
+}
+
+.archive-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+/* "PAST QUERIES" label — uppercase + letter-spacing matches the design's
+   section-header convention used elsewhere (.auto-badge, etc.)            */
+.archive-panel-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.archive-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) var(--surface-2);
+}
+
+/* Archive entry: clickable card — hover and .expanded state share the same
+   styling so the card remains visually "selected" while expanded.         */
+.archive-entry {
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.archive-entry:hover,
+.archive-entry.expanded {
+  background: var(--surface-3);
+  border-color: var(--line-strong);
+}
+
+/* Entry head: flex row with req_id badge + status pill + datetime + size */
+.archive-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.78rem;
+  flex-wrap: wrap;
+}
+
+.archive-req-id {
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* Status pill: three semantic colors matching the archive filenames
+   (ok → green, fail → red, partial → amber)                               */
+.archive-status {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.arch-ok      { background: rgba(34,197,94,0.12);  color: var(--accent-2); border: 1px solid rgba(34,197,94,0.3); }
+.arch-fail    { background: rgba(239,68,68,0.12);  color: var(--danger);   border: 1px solid rgba(239,68,68,0.3); }
+.arch-partial { background: rgba(247,169,34,0.12); color: var(--accent);   border: 1px solid rgba(247,169,34,0.3); }
+
+.archive-dt,
+.archive-size {
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--muted);
+}
+
+/* Truncated user prompt preview — single line with ellipsis */
+.archive-preview {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inline trace expansion — rendered below the entry head when the entry is
+   clicked. Reuses .trace-row/.trace-ts/.trace-kind/.trace-detail CSS.
+   max-height + overflow-y:auto allows long traces to scroll independently. */
+.archive-trace-inline {
+  margin-top: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) var(--surface-2);
+}
+
+/* ── Responsive ──
+   960px: collapse side-by-side grids to single column
+   600px: stack status bar vertically, reduce top padding                   */
 @media (max-width: 960px) {
   .prompt-hero       { grid-template-columns: 1fr; }
   .pipeline-stages   { grid-template-columns: 1fr; }

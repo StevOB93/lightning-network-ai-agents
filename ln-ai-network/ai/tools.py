@@ -1,18 +1,45 @@
 from __future__ import annotations
 
+# =============================================================================
+# ai.tools — MCP tool registry, normalization, and schema generation
+#
+# Central reference for everything tool-related. Imported by:
+#   - ai.agent (legacy agent mode)
+#   - ai.pipeline (pipeline coordinator)
+#   - ai.controllers.executor (step execution)
+#   - ai.controllers.planner (system prompt generation)
+#   - ai.controllers.translator (indirectly via _normalize_tool_args)
+#
+# Contents:
+#   Tool category sets    — READ_ONLY_TOOLS, STATE_CHANGING_TOOLS, etc.
+#   TOOL_REQUIRED         — required arg names per tool (for validation)
+#   _normalize_tool_args  — unwrap, coerce, range-validate, required-check
+#   _is_tool_error        — extract error string from nested MCP result shapes
+#   _tool_sig             — deterministic fingerprint for oscillation detection
+#   _summarize_tool_result— compact one-line summary for trace logs
+#   _try_parse_tool_call  — fallback text parser for non-structured tool calls
+#   llm_tools_schema      — full OpenAI function-calling schema list
+#   llm_tools_schema_text — human-readable tool list for system prompts
+# =============================================================================
+
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
 # =============================================================================
-# Tool enforcement policy
+# Tool enforcement policy — category sets
 # =============================================================================
 
+# Tools that observe but never mutate state.
+# Used by the agent's oscillation detector and redundant-recall gate:
+#   - A repeated call with the same args since the last state change is blocked.
+#   - More than MAX_CONSEC_READ_ONLY consecutive calls triggers a "stuck" stop.
 READ_ONLY_TOOLS = {
     "network_health",
     "btc_getblockchaininfo",
-    "btc_getnewaddress",
+    "btc_getnewaddress",    # Returns an address but doesn't spend or mutate channels
     "ln_listnodes",
     "ln_node_status",
     "ln_getinfo",
@@ -22,6 +49,9 @@ READ_ONLY_TOOLS = {
     "ln_newaddr",
 }
 
+# Tools that change node/channel/wallet state.
+# When one of these succeeds, the agent's recall gate is cleared (seen_since_state_change.clear())
+# and the read-only counter is reset — the LLM is allowed to re-read state that may have changed.
 STATE_CHANGING_TOOLS = {
     "btc_wallet_ensure",
     "btc_sendtoaddress",
@@ -36,6 +66,8 @@ STATE_CHANGING_TOOLS = {
     "ln_pay",
 }
 
+# Union of both categories: tools that the fallback text parser is allowed to execute.
+# This ensures a fallback-parsed tool name isn't something outside our known set.
 FALLBACK_ALLOWED_TOOLS = READ_ONLY_TOOLS | STATE_CHANGING_TOOLS
 
 
@@ -43,6 +75,10 @@ FALLBACK_ALLOWED_TOOLS = READ_ONLY_TOOLS | STATE_CHANGING_TOOLS
 # Tool required-arg registry
 # =============================================================================
 
+# Maps each tool name to its list of required argument keys.
+# Used by _normalize_tool_args for two purposes:
+#   1. Detect if required keys are missing so we can try unwrapping {"args": {...}}
+#   2. Final validation: return an error if keys are still missing after unwrapping
 TOOL_REQUIRED: Dict[str, List[str]] = {
     # Health
     "network_health": [],
@@ -51,10 +87,10 @@ TOOL_REQUIRED: Dict[str, List[str]] = {
     "btc_getblockchaininfo": [],
     "btc_wallet_ensure": ["wallet_name"],
     "btc_getnewaddress": [],
-    "btc_sendtoaddress": ["address", "amount_btc"],
+    "btc_sendtoaddress": ["address", "amount_btc"],  # wallet is optional
     "btc_generatetoaddress": ["blocks", "address"],
 
-    # Nodes
+    # Node lifecycle
     "ln_listnodes": [],
     "ln_node_status": ["node"],
     "ln_node_start": ["node"],
@@ -78,7 +114,26 @@ TOOL_REQUIRED: Dict[str, List[str]] = {
     "ln_pay": ["from_node", "bolt11"],
 }
 
+# Fields that must be integers — LLMs sometimes emit them as strings ("1" instead of 1)
 _INT_KEYS = {"node", "from_node", "port", "blocks", "amount_sat", "amount_msat"}
+
+# Subset of _INT_KEYS that represent node numbers — validated against node_count
+_NODE_KEYS = {"node", "from_node"}
+
+
+def _get_node_count() -> int:
+    """
+    Read the active node count from runtime/node_count.
+
+    Written by the launcher when nodes start. Falls back to 2 (standard regtest
+    pair) if the file is absent or unreadable. Read on every normalization call
+    so changes take effect without restarting the agent.
+    """
+    try:
+        p = Path(__file__).resolve().parent.parent / "runtime" / "node_count"
+        return int(p.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return 2
 
 
 # =============================================================================
@@ -86,6 +141,14 @@ _INT_KEYS = {"node", "from_node", "port", "blocks", "amount_sat", "amount_msat"}
 # =============================================================================
 
 def _coerce_int_fields(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert string values to int for known integer fields.
+
+    LLMs sometimes emit {"node": "1"} instead of {"node": 1} — this fix
+    ensures downstream code that does integer arithmetic or comparisons works
+    correctly. Only converts strings that are purely numeric (via .isdigit()).
+    Negative values and floats are intentionally left alone.
+    """
     out = dict(args)
     for k, v in list(out.items()):
         if k in _INT_KEYS and isinstance(v, str):
@@ -97,19 +160,31 @@ def _coerce_int_fields(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _normalize_tool_args(tool: str, args: Any) -> Tuple[Dict[str, Any], Optional[str], bool]:
     """
+    Normalize, validate, and return tool arguments.
+
     Returns (normalized_args, error_or_none, changed_bool).
 
-    Fixes common LLM tool-call arg shapes:
-      - unwraps {"args": {...}} if required keys are missing but nested args exists
-      - merges nested args into top-level (nested wins)
-      - coerces common integer fields
-      - validates required keys (if known)
+    Processing steps (in order):
+      1. Coerce args to dict if it's not already one
+      2. If required keys are missing and there's an inner {"args": {...}} dict,
+         unwrap it (LLMs sometimes wrap args in a nested "args" key)
+      3. Coerce string integer fields to int
+      4. Validate node numbers are within [1, node_count]
+      5. Validate bitcoin addresses have a valid regtest prefix
+      6. Check all required keys are present
+
+    The `changed` bool indicates whether any normalization was applied —
+    the caller uses this to decide whether to log a normalization event.
+
+    Error strings describe the first validation failure found. The executor
+    treats a non-None error as a hard failure for that step.
     """
     changed = False
 
     a: Dict[str, Any] = args if isinstance(args, dict) else {}
     reqs = TOOL_REQUIRED.get(tool)
 
+    # Step 2: Unwrap nested {"args": {...}} if required keys are missing
     if reqs is not None and reqs:
         missing = [k for k in reqs if k not in a]
         if missing:
@@ -117,15 +192,32 @@ def _normalize_tool_args(tool: str, args: Any) -> Tuple[Dict[str, Any], Optional
             if isinstance(inner, dict):
                 merged = dict(a)
                 merged.pop("args", None)
-                merged.update(inner)
+                merged.update(inner)  # Inner args win over outer
                 a = merged
                 changed = True
 
+    # Step 3: Coerce string integers
     a2 = _coerce_int_fields(a)
     if a2 != a:
         changed = True
     a = a2
 
+    # Step 4: Validate node number ranges
+    node_count = _get_node_count()
+    for key in _NODE_KEYS:
+        if key in a and isinstance(a[key], int):
+            if a[key] < 1 or a[key] > node_count:
+                return a, f"node {a[key]} out of range (valid: 1-{node_count})", changed
+
+    # Step 5: Validate bitcoin addresses for regtest network
+    # Valid regtest prefixes: bcrt1 (segwit), 2 (P2SH), m/n (legacy)
+    if tool in ("btc_generatetoaddress", "btc_sendtoaddress"):
+        addr = a.get("address", "")
+        if isinstance(addr, str) and addr:
+            if not addr.startswith(("bcrt1", "2", "m", "n")):
+                return a, f"invalid regtest address: {addr[:20]}...", changed
+
+    # Step 6: Final required-key check (after all normalization attempts)
     if reqs is not None and reqs:
         missing2 = [k for k in reqs if k not in a]
         if missing2:
@@ -139,16 +231,36 @@ def _normalize_tool_args(tool: str, args: Any) -> Tuple[Dict[str, Any], Optional
 # =============================================================================
 
 def _is_tool_error(result: Any) -> Optional[str]:
+    """
+    Extract an error message from an MCP tool result, or return None if OK.
+
+    MCP tools use three different error shapes; this handles all of them:
+
+      Shape 1 (top-level error):
+        {"error": "message string"}
+
+      Shape 2 (top-level ok=false):
+        {"ok": false, "error": "message string"}
+
+      Shape 3 (nested result wrapper):
+        {"result": {"ok": false, "error": "message string"}}
+        {"result": {"error": "message string"}}
+
+    Returns the error string if any shape indicates failure, None if OK.
+    """
     if not isinstance(result, dict):
         return None
 
+    # Shape 1: top-level error field
     if "error" in result and isinstance(result["error"], str) and result["error"].strip():
         return result["error"].strip()
 
+    # Shape 2: top-level ok=false
     if result.get("ok") is False:
         err = result.get("error")
         return str(err) if err else "Tool returned ok=false"
 
+    # Shape 3: nested result dict
     inner = result.get("result")
     if isinstance(inner, dict):
         if "error" in inner and isinstance(inner["error"], str) and inner["error"].strip():
@@ -165,6 +277,14 @@ def _is_tool_error(result: Any) -> Optional[str]:
 # =============================================================================
 
 def _tool_sig(name: str, args: Dict[str, Any]) -> str:
+    """
+    Produce a deterministic string fingerprint for a tool call.
+
+    Format: "tool_name:{"key": value, ...}" (keys sorted for stability).
+    Used by the agent's oscillation detector and redundant-recall gate to
+    compare tool calls across steps without maintaining separate data structures.
+    Falls back to str() representation if the args are not JSON-serializable.
+    """
     try:
         return f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
     except Exception:
@@ -172,6 +292,17 @@ def _tool_sig(name: str, args: Dict[str, Any]) -> str:
 
 
 def _summarize_tool_result(result: Any, max_len: int = 400) -> str:
+    """
+    Produce a compact one-line summary of a tool result for trace logging.
+
+    Handles the three MCP result shapes:
+      error field              → "error=<message>"
+      nested ok=false          → "ok=false error=<message>"
+      nested ok=true + payload → "ok=true payload=<JSON>"
+      other                    → truncated JSON
+
+    max_len caps the output length so trace log entries stay readable.
+    """
     try:
         if isinstance(result, dict):
             if "error" in result:
@@ -194,10 +325,18 @@ def _summarize_tool_result(result: Any, max_len: int = 400) -> str:
 
 
 # =============================================================================
-# Fallback tool-call parsing (strict)
+# Fallback tool-call text parser
 # =============================================================================
 
 def _parse_value(s: str) -> Any:
+    """
+    Parse a single string token to its Python type.
+
+    Used by the kwargs-form and space-form parsers in _try_parse_tool_call.
+    Converts: "true"/"false" → bool, "null"/"none" → None,
+              integer strings → int, float strings → float,
+              quoted strings → unquoted string, other → raw string.
+    """
     s = s.strip()
     if s.lower() in ("true", "false"):
         return s.lower() == "true"
@@ -220,18 +359,27 @@ def _parse_value(s: str) -> Any:
 
 def _try_parse_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
-    Strictly parse a single tool call from model text.
-    Supported forms:
-      - tool_name({...json...})
-      - tool_name(key=value, key=value)
-      - tool_name key=value key=value
-      - {"tool":"...", "args":{...}}
-    Returns (tool, args) or None.
+    Parse a tool call from plain text when the LLM used non-structured format.
+
+    Called as a fallback in the agent loop when the LLM returns a "final"
+    response while require_tool_next is True — the LLM may have embedded the
+    tool call as text rather than using the structured tool_calls format.
+
+    Supported input forms (tried in order):
+      1. {"tool":"name", "args":{...}}          JSON object form
+      2. tool_name({...json...})                Function + JSON body
+      3. tool_name(key=value, key=value)        Function + kwargs
+      4. tool_name key=value key=value          Space-separated kwargs
+
+    Returns (tool_name, args_dict) on success, None if no form matches.
+    The caller is responsible for validating that the tool name is in
+    FALLBACK_ALLOWED_TOOLS before executing.
     """
     if not text:
         return None
     t = text.strip()
 
+    # Form 1: JSON object with "tool" and "args" keys
     if t.startswith("{") and t.endswith("}"):
         try:
             obj = json.loads(t)
@@ -240,6 +388,7 @@ def _try_parse_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
         except Exception:
             pass
 
+    # Forms 2 + 3: tool_name(...) — either JSON body or key=value pairs
     m = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)\s*$", t)
     if m:
         tool = m.group(1)
@@ -252,7 +401,8 @@ def _try_parse_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
                 if isinstance(args, dict):
                     return tool, args
             except Exception:
-                return None
+                return None  # Malformed JSON inside parens; don't proceed
+        # Form 3: key=value, key=value
         args2: Dict[str, Any] = {}
         parts = [p.strip() for p in inner.split(",") if p.strip()]
         for p in parts:
@@ -262,6 +412,7 @@ def _try_parse_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
             args2[k.strip()] = _parse_value(v.strip())
         return tool, args2
 
+    # Form 4: tool_name key=value key2=value2
     m2 = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s+(.*)$", t)
     if m2:
         tool = m2.group(1)
@@ -282,7 +433,16 @@ def _try_parse_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
 # =============================================================================
 
 def llm_tools_schema() -> List[Dict[str, Any]]:
-    """Return the full MCP tool schema list in OpenAI function-calling format."""
+    """
+    Return the full MCP tool schema in OpenAI function-calling format.
+
+    This is the definitive list of tools exposed to the LLM. Used by:
+      - The agent's step() call (passed as the `tools` parameter)
+      - The planner's system prompt (via llm_tools_schema_text())
+      - _allowed_tool_names() in the Ollama fallback parser
+
+    Format: [{"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}]
+    """
     return [
         # Health
         {"type": "function", "function": {"name": "network_health", "description": "Check Bitcoin+Lightning health.", "parameters": {"type": "object", "properties": {}}}},
@@ -320,7 +480,19 @@ def llm_tools_schema() -> List[Dict[str, Any]]:
 
 
 def llm_tools_schema_text() -> str:
-    """Return tool schema as human-readable text (for embedding in planner system prompt)."""
+    """
+    Return a human-readable text representation of all MCP tools.
+
+    Used by the Planner's system prompt (embedded as a reference table) so the
+    LLM knows the exact tool names, descriptions, and required args when
+    generating an ExecutionPlan without the overhead of the full JSON schema.
+
+    Format:
+      tool: <name>
+        description: <description>
+        args:
+          <arg>: <type> (required|optional)
+    """
     lines = ["Available MCP tools:\n"]
     for entry in llm_tools_schema():
         fn = entry["function"]

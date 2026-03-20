@@ -1,5 +1,37 @@
 from __future__ import annotations
 
+# =============================================================================
+# OllamaBackend — local LLM via Ollama HTTP API
+#
+# Connects to a locally-running Ollama server and calls its /api/chat endpoint.
+# Handles Ollama's two tool-call signaling methods:
+#
+#   Method 1 (preferred): structured tool_calls field in the response message
+#     Ollama (with recent models like llama3.1, qwen2.5) may return:
+#       {"message": {"role": "assistant", "tool_calls": [{"function": {...}}]}}
+#     These are parsed directly into ToolCall objects.
+#
+#   Method 2 (fallback): tool call embedded as text in the message content
+#     Some models/versions return tool calls as formatted text rather than
+#     structured JSON. The fallback parser (_try_parse_single_tool_call)
+#     handles several text formats:
+#       - {"tool": "name", "args": {...}}         (JSON object form)
+#       - {"tool_calls": [{"name": ..., "args": ...}]}  (JSON list form)
+#       - tool_name({"key": value})               (function-call form)
+#       - tool_name(key=value, key2=value2)       (kwargs form)
+#       - tool_name key=value key2=value2         (space-separated form)
+#     The parsed tool name must appear in the request's tools schema
+#     (checked via _allowed_tool_names) to prevent hallucinated tool names
+#     from triggering real MCP calls.
+#
+# Env vars:
+#   OLLAMA_BASE_URL       base URL of the Ollama server (default: http://127.0.0.1:11434)
+#   OLLAMA_MODEL          model name to use (default: llama3.2:3b)
+#   OLLAMA_TIMEOUT_SEC    HTTP timeout in seconds (default: 120)
+#   OLLAMA_TOOL_TEMP_ZERO if true, force temperature=0 when tools are present
+#                         to make tool selection deterministic (default: 1/true)
+# =============================================================================
+
 import json
 import os
 import re
@@ -19,13 +51,25 @@ from ai.llm.base import (
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean env var. Truthy: 1, true, yes, on (case-insensitive)."""
     v = os.getenv(name)
     if v is None:
         return default
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+# ---------------------------------------------------------------------------
+# Fallback text parser for tool calls embedded in message content
+# ---------------------------------------------------------------------------
+
 def _parse_value(s: str) -> Any:
+    """
+    Convert a single string value token to its Python type.
+
+    Used by the kwargs-form and space-form fallback parsers to convert
+    "1" → 1, "true" → True, "null" → None, etc.
+    Leaves unrecognized strings as-is (not quoted).
+    """
     s = s.strip()
     if s.lower() in ("true", "false"):
         return s.lower() == "true"
@@ -41,6 +85,7 @@ def _parse_value(s: str) -> Any:
             return float(s)
         except Exception:
             return s
+    # Strip surrounding quotes if present
     if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
         return s[1:-1]
     return s
@@ -48,19 +93,22 @@ def _parse_value(s: str) -> Any:
 
 def _try_parse_single_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
-    Strictly parse a single tool call from assistant content.
-    Supported:
-      - {"tool_calls":[{"name":"tool","args":{...}}, ...]}
-      - {"tool":"tool","args":{...}}
-      - tool_name({...json...})
-      - tool_name(key=value, key=value)
-      - tool_name key=value key=value
+    Parse a tool call from assistant content text when structured tool_calls is absent.
+
+    Tries four forms in order:
+      1. JSON object: {"tool":"name","args":{...}} or {"tool_calls":[{"name":...,"args":...}]}
+      2. Function form: tool_name({...json...})
+      3. Kwargs form:   tool_name(key=value, key=value)
+      4. Space form:    tool_name key=value key=value
+
+    Returns (tool_name, args_dict) or None if no form matches.
+    None is the safe fallback — the caller treats it as a final text response.
     """
     if not text:
         return None
     t = text.strip()
 
-    # JSON envelope forms
+    # Form 1: JSON object
     if t.startswith("{") and t.endswith("}"):
         try:
             obj = json.loads(t)
@@ -78,7 +126,7 @@ def _try_parse_single_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]
                     args = first.get("args")
                     return first["name"], args if isinstance(args, dict) else {}
 
-    # tool_name(...)
+    # Form 2 + 3: tool_name(...) — JSON body or key=value pairs
     m = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)\s*$", t)
     if m:
         name = m.group(1)
@@ -91,7 +139,8 @@ def _try_parse_single_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]
                 if isinstance(args, dict):
                     return name, args
             except Exception:
-                return None
+                return None  # Malformed JSON inside parens — don't guess
+        # Form 3: key=value, key=value
         args2: Dict[str, Any] = {}
         parts = [p.strip() for p in inner.split(",") if p.strip()]
         for p in parts:
@@ -101,7 +150,7 @@ def _try_parse_single_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]
             args2[k.strip()] = _parse_value(v.strip())
         return name, args2
 
-    # tool_name key=value ...
+    # Form 4: tool_name key=value key2=value2 (space-separated)
     m2 = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s+(.*)$", t)
     if m2:
         name = m2.group(1)
@@ -109,7 +158,7 @@ def _try_parse_single_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]
         args3: Dict[str, Any] = {}
         for tok in rest.split():
             if "=" not in tok:
-                return None
+                return None  # Not a key=value token — don't guess
             k, v = tok.split("=", 1)
             args3[k.strip()] = _parse_value(v.strip())
         return name, args3
@@ -118,6 +167,14 @@ def _try_parse_single_tool_call(text: str) -> Optional[Tuple[str, Dict[str, Any]
 
 
 def _allowed_tool_names(tools_schema: List[Dict[str, Any]]) -> set[str]:
+    """
+    Extract the set of valid tool names from the tools schema list.
+
+    Used to gate the fallback parser: a parsed tool name must appear in this
+    set before we treat it as a real tool call. Without this check, the LLM
+    could hallucinate a tool name that looks like the right format but doesn't
+    correspond to any registered MCP tool.
+    """
     allowed: set[str] = set()
     for t in tools_schema or []:
         try:
@@ -130,15 +187,19 @@ def _allowed_tool_names(tools_schema: List[Dict[str, Any]]) -> set[str]:
     return allowed
 
 
+# ---------------------------------------------------------------------------
+# OllamaBackend
+# ---------------------------------------------------------------------------
+
 class OllamaBackend(LLMBackend):
     """
-    Ollama backend (local LLM) using HTTP.
+    LLMBackend implementation using Ollama's local HTTP API (/api/chat).
 
-    Env vars:
-      - OLLAMA_BASE_URL (default: http://127.0.0.1:11434)
-      - OLLAMA_MODEL (default: llama3.2:3b)
-      - OLLAMA_TIMEOUT_SEC (default: 120)
-      - OLLAMA_TOOL_TEMP_ZERO (default: 1)  -> force temperature=0 when tools are present
+    Response parsing priority:
+      1. Structured tool_calls in the message — most reliable; use directly.
+      2. Content text parsed as a tool call — fallback for models that embed
+         tool calls as text instead of using structured format.
+      3. Plain text final response — if neither of the above matches.
     """
 
     def __init__(
@@ -150,12 +211,14 @@ class OllamaBackend(LLMBackend):
         self.base_url = (base_url or os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
         self.model = model or os.getenv("OLLAMA_MODEL") or "llama3.2:3b"
         self.timeout_sec = int(timeout_sec or os.getenv("OLLAMA_TIMEOUT_SEC") or "120")
+        # Force temperature=0 when tool schemas are included to get deterministic
+        # tool selection; temperature > 0 can make tool choice unpredictable.
         self.tool_temp_zero = _env_bool("OLLAMA_TOOL_TEMP_ZERO", default=True)
 
     def step(self, request: LLMRequest) -> LLMResponse:
         url = f"{self.base_url}/api/chat"
 
-        # Deterministic preference when tools exist
+        # Override temperature to 0 when tool schemas are present (if configured)
         temp = float(request.temperature)
         if self.tool_temp_zero and (request.tools or []):
             temp = 0.0
@@ -163,7 +226,7 @@ class OllamaBackend(LLMBackend):
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": request.messages,
-            "stream": False,
+            "stream": False,      # Get complete response in one JSON body
             "tools": request.tools or [],
             "options": {
                 "temperature": temp,
@@ -176,6 +239,7 @@ class OllamaBackend(LLMBackend):
         except requests.RequestException as e:
             raise TransientAPIError(f"Ollama connection failed: {e}") from e
 
+        # Map HTTP status codes to normalized error types
         if 500 <= r.status_code <= 599:
             raise TransientAPIError(f"Ollama server error {r.status_code}: {r.text}")
         if 400 <= r.status_code <= 499:
@@ -188,22 +252,23 @@ class OllamaBackend(LLMBackend):
 
         msg = data.get("message") or {}
 
-        # 1) Structured tool_calls (preferred)
+        # ── Priority 1: Structured tool_calls ────────────────────────────────
         tool_calls: List[ToolCall] = []
         raw_tool_calls = msg.get("tool_calls") or []
         for tc in raw_tool_calls:
             fn = (tc.get("function") or {})
             name = fn.get("name")
             args = fn.get("arguments")
+            # arguments may be a JSON string or already a dict
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
                 except Exception:
-                    args = {"_raw": args}
+                    args = {"_raw": args}  # Preserve for debugging; normalization handles later
             if isinstance(name, str) and name:
                 tool_calls.append(ToolCall(name=name, args=args or {}))
 
-        # Usage (optional)
+        # Extract usage metrics (both fields may be absent on older Ollama versions)
         usage = None
         prompt_tokens = data.get("prompt_eval_count")
         output_tokens = data.get("eval_count")
@@ -215,9 +280,15 @@ class OllamaBackend(LLMBackend):
             )
 
         if tool_calls:
-            return LLMResponse(type="tool_call", tool_calls=tool_calls, content=None, reasoning=None, usage=usage)
+            return LLMResponse(
+                type="tool_call",
+                tool_calls=tool_calls,
+                content=None,
+                reasoning=None,
+                usage=usage,
+            )
 
-        # 2) Deterministic fallback: parse tool call from content (only if tool is allowed)
+        # ── Priority 2: Fallback — parse tool call from content text ─────────
         content = msg.get("content")
         content_str = content if isinstance(content, str) else ""
         allowed = _allowed_tool_names(request.tools)
@@ -226,6 +297,7 @@ class OllamaBackend(LLMBackend):
         if parsed is not None:
             name, args = parsed
             if name in allowed:
+                # Only treat as a tool call if the name is in the schema
                 return LLMResponse(
                     type="tool_call",
                     tool_calls=[ToolCall(name=name, args=args)],
@@ -234,5 +306,11 @@ class OllamaBackend(LLMBackend):
                     usage=usage,
                 )
 
-        # 3) Final
-        return LLMResponse(type="final", tool_calls=[], content=content_str, reasoning=None, usage=usage)
+        # ── Priority 3: Plain text final response ────────────────────────────
+        return LLMResponse(
+            type="final",
+            tool_calls=[],
+            content=content_str,
+            reasoning=None,
+            usage=usage,
+        )

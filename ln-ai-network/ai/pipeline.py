@@ -1,38 +1,49 @@
 from __future__ import annotations
 
-import atexit
+# Standard library
 import json
 import os
-import sys
 import time
 import traceback
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Internal modules
 from ai.command_queue import read_new, write_outbox
 from ai.controllers.executor import Executor, ExecutorConfig, ExecutorError
 from ai.controllers.planner import Planner, PlannerConfig, PlannerError
+from ai.controllers.summarizer import Summarizer, SummarizerConfig
 from ai.controllers.translator import Translator, TranslatorConfig, TranslatorError
+from ai.core.config import AgentConfig
+from ai.core.scheduler import DeterministicScheduler
 from ai.llm.factory import create_backend_for_role
 from ai.mcp_client import FastMCPClientWrapper, MCPClient
-from ai.models import PipelineResult
+from ai.models import IntentBlock, PipelineResult
+from ai.utils import (
+    StartupLock,
+    TraceLogger,
+    _env_bool,
+    _repo_root,
+    _runtime_agent_dir,
+)
 from mcp.client.fastmcp import FastMCPClient
 
-try:
-    import fcntl
-except Exception:
-    fcntl = None  # type: ignore
+# Human-readable version string embedded in every pipeline report.
+# Changing this string signals to the UI that the codebase was updated.
+PIPELINE_BUILD = "pipeline-v1(translator+planner+executor+summarizer+history+verify)"
 
+# How many prior exchanges (user+assistant pairs) to include as conversation context.
+# Sliding window: older turns are dropped when this limit is reached.
+_HISTORY_MAX = int(os.getenv("PIPELINE_HISTORY_MAX", "2"))
 
-PIPELINE_BUILD = "pipeline-v1(translator+planner+executor+history+verify)"
-
-# How many prior exchanges (user+assistant pairs) to include as conversation context
-_HISTORY_MAX = int(os.getenv("PIPELINE_HISTORY_MAX", "4"))
-
-# Post-execution read-only verification tool per intent type.
-# After a successful state-changing run, we call this tool to confirm the goal.
+# Maps each state-changing intent type to a read-only MCP tool used to confirm
+# the operation actually took effect after execution. Called in _verify_goal().
+# Only intent types that have a natural read-back are included — noop and
+# freeform are omitted because there's no canonical confirmation tool.
+#
+# Note: all listed tools require a "node" arg. _verify_goal() derives the node
+# from intent.context["from_node"] or intent.context["node"], defaulting to 1.
 _VERIFY_TOOL: Dict[str, str] = {
-    "pay_invoice":  "ln_listpays",
+    "pay_invoice":  "ln_listfunds",    # ln_listfunds shows balance post-payment (ln_listpays doesn't exist)
     "open_channel": "ln_listchannels",
     "rebalance":    "ln_listchannels",
     "set_fee":      "ln_listchannels",
@@ -40,199 +51,125 @@ _VERIFY_TOOL: Dict[str, str] = {
 
 
 # =============================================================================
-# Startup lock (single pipeline instance)
-# =============================================================================
-
-class StartupLock:
-    def __init__(self, lock_path: Path) -> None:
-        self.lock_path = lock_path
-        self._fh = None
-
-    def acquire_or_exit(self) -> None:
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = self.lock_path.open("a+", encoding="utf-8")
-        try:
-            if fcntl is None:
-                fh.seek(0)
-                existing = fh.read().strip()
-                if existing:
-                    raise RuntimeError(existing)
-            else:
-                try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    fh.seek(0)
-                    existing = fh.read().strip()
-                    msg = existing or "Another pipeline instance holds the lock."
-                    raise RuntimeError(msg)
-
-            fh.seek(0)
-            fh.truncate()
-            fh.write(f"pid={os.getpid()} started_ts={int(time.time())}\n")
-            fh.flush()
-            try:
-                os.fsync(fh.fileno())
-            except Exception:
-                pass
-
-            self._fh = fh
-            atexit.register(self.release)
-
-        except Exception as e:
-            try:
-                fh.close()
-            except Exception:
-                pass
-            err = {
-                "kind": "pipeline_lock_failed",
-                "lock_path": str(self.lock_path),
-                "error": str(e),
-                "hint": "Another ai.pipeline process is already running. Stop it first.",
-            }
-            print(json.dumps(err, ensure_ascii=False), file=sys.stderr)
-            raise SystemExit(1)
-
-    def release(self) -> None:
-        if self._fh is None:
-            return
-        try:
-            if fcntl is not None:
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        try:
-            self._fh.close()
-        except Exception:
-            pass
-        self._fh = None
-
-
-# =============================================================================
-# Trace logger (reset per prompt)
-# =============================================================================
-
-class TraceLogger:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def reset(self, header: Dict[str, Any]) -> None:
-        with self.path.open("w", encoding="utf-8") as f:
-            f.write(json.dumps(header, ensure_ascii=False) + "\n")
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except Exception:
-                pass
-
-    def log(self, event: Dict[str, Any]) -> None:
-        event = dict(event)
-        event.setdefault("ts", int(time.time()))
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except Exception:
-                pass
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _runtime_agent_dir() -> Path:
-    return _repo_root() / "runtime" / "agent"
-
-
-def _now_monotonic() -> float:
-    return time.monotonic()
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return int(v.strip())
-    except Exception:
-        return default
-
-
-# =============================================================================
 # Pipeline coordinator
 # =============================================================================
 
 class PipelineCoordinator:
+    """
+    Top-level orchestrator for the 4-stage AI pipeline:
+      1. Translator  — NL prompt → structured IntentBlock (via LLM)
+      2. Planner     — IntentBlock → ordered ExecutionPlan (via LLM)
+      3. Executor    — ExecutionPlan → step-by-step MCP tool calls
+      4. Summarizer  — tool results → human-readable answer (via LLM)
+
+    One PipelineCoordinator runs as a long-lived process, polling the inbox
+    file for new commands at a configurable tick rate. Results are written to
+    the outbox file, where the UI server picks them up via SSE.
+
+    Architecture note: each stage uses a *separate* LLM backend instance
+    (created via create_backend_for_role). This allows different models or
+    temperature settings per stage without sharing conversation state.
+    """
+
     def __init__(self) -> None:
         repo_root = _repo_root()
+
+        # Acquire the single-instance lock before doing any real work.
+        # If another pipeline is running this will print an error and exit(1).
         lock_path = repo_root / "runtime" / "agent" / "pipeline.lock"
-        self._lock = StartupLock(lock_path)
+        self._lock = StartupLock(lock_path, name="pipeline")
         self._lock.acquire_or_exit()
 
+        # Centralised configuration — all env vars read once at startup
+        self._cfg = AgentConfig.from_env()
+
+        # MCP client — wraps FastMCPClient so tool calls go through a uniform
+        # MCPClient interface (call, list_tools). FastMCPClientWrapper adds
+        # connection management and retry logic on top of the bare FastMCPClient.
         self.mcp: MCPClient = FastMCPClientWrapper(FastMCPClient())
 
+        # Each stage gets its own LLM backend. "role" maps to a config section
+        # that can specify a different model, temperature, or system prompt prefix.
         translator_backend = create_backend_for_role("translator")
         planner_backend = create_backend_for_role("planner")
+        summarizer_backend = create_backend_for_role("summarizer")
 
+        # Shared trace logger — all four stages write to the same trace.log file
         self.trace = TraceLogger(_runtime_agent_dir() / "trace.log")
 
+        # Instantiate each stage controller, injecting shared dependencies
         self.translator = Translator(TranslatorConfig.from_env(), translator_backend, self.trace)
         self.planner = Planner(PlannerConfig.from_env(), planner_backend, self.trace)
         self.executor = Executor(ExecutorConfig.from_env(), self.mcp, self.trace)
+        self.summarizer = Summarizer(SummarizerConfig.from_env(), summarizer_backend, self.trace)
 
-        self.tick_s = float(_env_int("AGENT_TICK_MS", 500)) / 1000.0
+        # Drift-free fixed-interval scheduler — fires every cfg.tick_ms milliseconds.
+        # Uses DeterministicScheduler instead of naive sleep() so slow queries
+        # don't cause cumulative drift in the inbox poll cadence.
+        self._sched = DeterministicScheduler(self._cfg.tick_ms)
+
+        # Master kill switch: if ALLOW_LLM != 1, every freeform query is
+        # immediately rejected. Prevents accidental API usage during dev/testing.
         self.allow_llm = _env_bool("ALLOW_LLM", default=False)
+
         # Rolling conversation history: list of {"role": "user"|"assistant", "content": str}
+        # Injected into the Translator's messages so follow-up queries have context.
         self._history: List[Dict[str, Any]] = []
 
     def _log(self, kind: str, payload: Dict[str, Any]) -> None:
+        """Emit a structured JSON log line to stdout (picked up by the process supervisor)."""
         out = {"ts": int(time.time()), "kind": kind, **payload}
         print(json.dumps(out, ensure_ascii=False), flush=True)
 
-    def _sleep_to_next_tick(self, start_t: float) -> None:
-        elapsed = _now_monotonic() - start_t
-        time.sleep(max(0.0, self.tick_s - elapsed))
-
     def _write_report(self, result: PipelineResult) -> None:
+        """Serialize and append the pipeline result to the outbox JSONL file."""
         write_outbox(result.to_outbox_dict())
 
     def _update_history(self, user_text: str, assistant_summary: str) -> None:
-        """Append the latest exchange and trim to _HISTORY_MAX pairs."""
+        """
+        Append the latest exchange to the rolling history buffer and trim to
+        _HISTORY_MAX pairs.
+
+        We store the intent's goal string (not the full verbose summary) as the
+        assistant turn. This keeps the history compact and avoids injecting raw
+        tool output JSON into subsequent prompts.
+        """
         self._history.append({"role": "user",      "content": user_text})
         self._history.append({"role": "assistant",  "content": assistant_summary})
-        # Keep only the last N*2 messages (N pairs)
+        # Keep only the last N*2 messages (N user+assistant pairs)
         max_msgs = _HISTORY_MAX * 2
         if len(self._history) > max_msgs:
             self._history = self._history[-max_msgs:]
 
-    def _verify_goal(self, intent: "IntentBlock", req_id: int) -> Optional[str]:
+    def _verify_goal(self, intent: IntentBlock, req_id: int) -> Optional[str]:
         """
-        Run a single read-only MCP tool to confirm a state-changing intent succeeded.
-        Returns a short confirmation string, or None if no verification is defined or it fails.
+        Post-execution read-only verification for state-changing intents.
+
+        After an executor run that reports success, we call a read-only tool
+        (from _VERIFY_TOOL) to confirm the state actually changed. This catches
+        cases where a tool reported ok=True but the change didn't persist
+        (e.g., a race condition or a silent MCP-level rollback).
+
+        Returns a short confirmation string appended to the human summary,
+        or None if:
+          - No verification tool is defined for this intent type
+          - The MCP call fails (we don't want a verify failure to override
+            a successful execution report — it's advisory only)
         """
         tool = _VERIFY_TOOL.get(intent.intent_type)
         if not tool:
-            return None
+            return None  # Intents like "noop" and "freeform" have no canonical verify
+        # Derive the relevant node from intent context. Use from_node (the initiating
+        # node for channel/payment operations) or node, defaulting to 1.
+        node = intent.context.get("from_node") or intent.context.get("node") or 1
         try:
-            raw = self.mcp.call(tool, {})
+            raw = self.mcp.call(tool, {"node": node})
             self.trace.log({"event": "goal_verify", "req_id": req_id, "tool": tool, "ok": True})
-            # Summarise: just confirm we got a non-error response
+            # Summarise: just confirm we got a non-error response with real data
             if isinstance(raw, dict):
                 payload = raw.get("result", raw).get("payload", {})
                 if isinstance(payload, dict):
-                    keys = list(payload.keys())[:3]
+                    keys = list(payload.keys())[:3]  # Show up to 3 keys as proof of data
                     return f"Verified via {tool}: {', '.join(keys) if keys else 'ok'}"
             return f"Verified via {tool}: ok"
         except Exception as exc:
@@ -244,8 +181,26 @@ class PipelineCoordinator:
     # -------------------------------------------------------------------------
 
     def _run_pipeline(self, req_id: int, user_text: str) -> PipelineResult:
+        """
+        Execute the full 4-stage pipeline for a single user query.
+
+        Returns a PipelineResult regardless of outcome — failures at any stage
+        produce a result with success=False and stage_failed set to the name
+        of the stage that failed. The caller (_run() loop) always writes the
+        result to the outbox so the UI updates even on error.
+
+        Stage short-circuits:
+          - If allow_llm is False, return immediately (no API call).
+          - If intent_type is "noop", skip planner+executor (no tools needed).
+          - If plan has no steps, skip executor.
+          - Summarizer only runs if all executor steps succeeded.
+
+        The ts captured at the top is shared across the full result so the UI
+        can correlate the outbox entry with the trace header.
+        """
         ts = int(time.time())
 
+        # Guard: LLM is disabled globally
         if not self.allow_llm:
             self.trace.log({"event": "llm_disabled", "req_id": req_id})
             return PipelineResult(
@@ -255,7 +210,8 @@ class PipelineCoordinator:
                 error="ALLOW_LLM!=1", pipeline_build=PIPELINE_BUILD,
             )
 
-        # Stage 1: Translate (with rolling conversation history)
+        # Stage 1: Translate — NL prompt → structured IntentBlock
+        # Passes rolling history so follow-up queries understand prior context.
         try:
             intent = self.translator.translate(user_text, req_id, history=list(self._history))
         except TranslatorError as e:
@@ -267,7 +223,16 @@ class PipelineCoordinator:
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
 
-        # Stage 2: Plan
+        # Short-circuit: noop intent needs no plan or execution
+        if intent.intent_type == "noop":
+            return PipelineResult(
+                request_id=req_id, ts=ts, success=True,
+                stage_failed=None, intent=intent, plan=None,
+                step_results=[], human_summary=intent.human_summary,
+                error=None, pipeline_build=PIPELINE_BUILD,
+            )
+
+        # Stage 2: Plan — IntentBlock → ordered ExecutionPlan of MCP tool calls
         try:
             plan = self.planner.plan(intent, req_id)
         except PlannerError as e:
@@ -279,7 +244,7 @@ class PipelineCoordinator:
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
 
-        # Noop: no steps to execute
+        # Short-circuit: planner returned an empty steps list (unusual but valid)
         if not plan.steps:
             return PipelineResult(
                 request_id=req_id, ts=ts, success=True,
@@ -288,7 +253,9 @@ class PipelineCoordinator:
                 error=None, pipeline_build=PIPELINE_BUILD,
             )
 
-        # Stage 3: Execute
+        # Stage 3: Execute — run each plan step against the MCP server sequentially
+        # ExecutorError carries partial_results so we can report what succeeded
+        # before the failure, even when raising.
         try:
             step_results = self.executor.execute(plan, req_id)
         except ExecutorError as e:
@@ -296,23 +263,40 @@ class PipelineCoordinator:
             return PipelineResult(
                 request_id=req_id, ts=ts, success=False,
                 stage_failed="executor", intent=intent, plan=plan,
-                step_results=e.partial_results,
+                step_results=e.partial_results,  # Show partial progress in the UI
                 human_summary=f"Execution failed: {e}",
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
 
+        # all_ok: every step either succeeded (ok=True) or was intentionally
+        # skipped (on_error=skip). A skipped step doesn't count as failure.
         all_ok = all(r.ok or r.skipped for r in step_results)
 
-        # Post-execution goal verification for state-changing intents
-        verification_note = ""
+        # Stage 4: Summarize — LLM produces a human-readable answer from tool results
+        # Only runs when all steps passed; otherwise falls back to the intent's
+        # pre-computed human_summary string.
+        if all_ok and step_results:
+            try:
+                summary = self.summarizer.summarize(intent, step_results, req_id)
+            except Exception as e:
+                # Summarizer failure is non-fatal — always fall back to the Translator's
+                # pre-computed human_summary. Log the exception so it's visible in the trace.
+                self.trace.log({"event": "summarizer_error", "req_id": req_id, "error": str(e)})
+                summary = intent.human_summary
+        else:
+            summary = intent.human_summary
+
+        # Post-execution goal verification: read the network state to confirm the
+        # intent actually took effect. Appends a short note to the summary if verified.
         if all_ok:
             note = self._verify_goal(intent, req_id)
             if note:
-                verification_note = f"\n\n{note}"
+                summary += f"\n\n{note}"
 
-        summary = intent.human_summary + verification_note
         return PipelineResult(
             request_id=req_id, ts=ts, success=all_ok,
+            # stage_failed is "executor" even when all_ok=False because the executor
+            # ran but not all steps passed (different from raising ExecutorError).
             stage_failed=None if all_ok else "executor",
             intent=intent, plan=plan, step_results=step_results,
             human_summary=summary,
@@ -324,27 +308,42 @@ class PipelineCoordinator:
     # -------------------------------------------------------------------------
 
     def run(self) -> None:
+        """
+        Blocking event loop. Polls the inbox JSONL file for new commands,
+        dispatches them through the pipeline, and writes results to the outbox.
+
+        Message routing by meta.kind:
+          "freeform" + use_llm=True  → full 4-stage pipeline + archive
+          "health_check"             → immediate success acknowledgement
+          (anything else)            → unknown command error response
+
+        Timing: tick_s controls the minimum interval between inbox polls.
+        If a query takes longer than tick_s, the next poll starts immediately
+        after it finishes (no sleep). This prevents queue backup.
+
+        Error handling: unhandled exceptions inside the loop are logged and
+        swallowed so the process stays alive. KeyboardInterrupt causes a clean
+        shutdown. The outer try/except does NOT catch SystemExit (raised by
+        StartupLock), so the process exits cleanly if the lock is stolen.
+        """
         self._log("pipeline_start", {
             "msg": "Pipeline online. Waiting for inbox commands.",
             "build": PIPELINE_BUILD,
         })
 
         while True:
-            tick_start = _now_monotonic()
             try:
-                msgs = read_new()
-                if not msgs:
-                    self._sleep_to_next_tick(tick_start)
-                    continue
-
-                for msg in msgs:
+                for msg in read_new():
                     req_id = int(msg.get("id", 0))
                     meta = msg.get("meta") or {}
                     kind = meta.get("kind")
 
                     if kind == "freeform" and bool(meta.get("use_llm", False)):
+                        # Capture start_ts here (before reset) so the archive
+                        # filename matches the timestamp in the trace header.
+                        start_ts = int(time.time())
                         self.trace.reset({
-                            "ts": int(time.time()),
+                            "ts": start_ts,
                             "event": "prompt_start",
                             "build": PIPELINE_BUILD,
                             "request_id": req_id,
@@ -353,8 +352,36 @@ class PipelineCoordinator:
                         user_text = str(msg.get("content", ""))
                         result = self._run_pipeline(req_id, user_text=user_text)
                         self._write_report(result)
-                        # Update rolling history so the next prompt has context
-                        self._update_history(user_text, result.human_summary)
+
+                        # Determine archive status:
+                        #   "ok"      → all steps succeeded
+                        #   "partial" → some steps ok/skipped but result.success=False
+                        #               (e.g. executor didn't hard-abort but had failures)
+                        #   "failed"  → no steps succeeded or pipeline aborted early
+                        if result.success:
+                            arch_status = "ok"
+                        elif result.step_results and any(r.ok or r.skipped for r in result.step_results):
+                            arch_status = "partial"
+                        else:
+                            arch_status = "failed"
+                        self.trace.archive(req_id, start_ts, arch_status)
+
+                        # Update rolling history so the next prompt has context.
+                        # Store the intent's goal (concise) not the verbose summary
+                        # (which may contain raw JSON from tool results).
+                        history_summary = result.intent.goal if result.intent else result.human_summary
+                        self._update_history(user_text, history_summary)
+
+                    elif kind == "health_check":
+                        # Lightweight ping — no LLM involved, just confirm we're alive
+                        write_outbox({
+                            "ts": int(time.time()),
+                            "type": "pipeline_report",
+                            "request_id": req_id,
+                            "success": True,
+                            "content": "Pipeline is running.",
+                            "pipeline_build": PIPELINE_BUILD,
+                        })
                     else:
                         write_outbox({
                             "ts": int(time.time()),
@@ -365,15 +392,18 @@ class PipelineCoordinator:
                             "pipeline_build": PIPELINE_BUILD,
                         })
 
-                self._sleep_to_next_tick(tick_start)
-
             except KeyboardInterrupt:
                 self._log("pipeline_stop", {"msg": "Shutdown requested."})
                 break
             except Exception:
+                # Log the full traceback but keep running — transient errors
+                # (network blips, MCP timeouts) shouldn't kill the pipeline.
                 self._log("pipeline_error", {})
                 traceback.print_exc()
-                self._sleep_to_next_tick(tick_start)
+
+            # Drift-free sleep: targets the next absolute tick time so slow
+            # queries don't cause cumulative drift in the inbox poll cadence.
+            self._sched.wait_next_tick()
 
 
 if __name__ == "__main__":

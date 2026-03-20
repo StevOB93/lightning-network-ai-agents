@@ -1,5 +1,28 @@
 from __future__ import annotations
 
+# =============================================================================
+# CLI entry point for the ln-ai-network agent
+#
+# Writes messages into the inbox queue (runtime/agent/inbox.jsonl) which the
+# running agent process picks up and executes. All commands are asynchronous:
+# `enqueue()` returns immediately; the agent processes the message in the
+# background and writes its response to outbox.jsonl.
+#
+# Command groups:
+#   health   — full network health report (no LLM)
+#   btc      — Bitcoin RPC operations: info, send, mine (no LLM)
+#   ln       — Lightning RPC operations: info, peers, funds, channels, newaddr,
+#               connect, openchannel, invoice, pay (no LLM)
+#   ask      — Freeform natural-language request. Requires --llm to explicitly
+#               authorize LLM API spending. This flag is a deliberate friction
+#               point — it prevents accidental LLM calls from scripts.
+#   last     — Print the most recent outbox entry (response from the agent)
+#
+# Installation: this module is registered as console_scripts entry point
+# "ln-ai" in setup.py / pyproject.toml, so `ln-ai <cmd>` works from any
+# directory after `pip install -e .`.
+# =============================================================================
+
 import argparse
 import json
 from ai.command_queue import enqueue, last_outbox
@@ -9,10 +32,11 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="ai.cli", description="ln-ai-network agent CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Cheap / deterministic
+    # ── health ────────────────────────────────────────────────────────────────
     health = sub.add_parser("health", help="Network health report (NO LLM)")
     health.add_argument("--raw", action="store_true", help="Include raw JSON in outbox entry")
 
+    # ── btc ───────────────────────────────────────────────────────────────────
     btc = sub.add_parser("btc", help="Bitcoin operations (NO LLM)")
     btc_sub = btc.add_subparsers(dest="btc_cmd", required=True)
     btc_sub.add_parser("info", help="getblockchaininfo")
@@ -23,6 +47,7 @@ def main() -> None:
     mine.add_argument("--blocks", required=True, type=int)
     mine.add_argument("--address", required=True)
 
+    # ── ln ────────────────────────────────────────────────────────────────────
     ln = sub.add_parser("ln", help="Lightning operations (NO LLM)")
     ln_sub = ln.add_subparsers(dest="ln_cmd", required=True)
 
@@ -41,6 +66,7 @@ def main() -> None:
     newaddr = ln_sub.add_parser("newaddr", help="newaddr")
     newaddr.add_argument("--node", required=True, type=int)
 
+    # connect / openchannel use --from-node / --to-node (agent resolves pubkeys internally)
     connect = ln_sub.add_parser("connect", help="connect from one node to another (agent resolves peer id/port)")
     connect.add_argument("--from-node", required=True, type=int)
     connect.add_argument("--to-node", required=True, type=int)
@@ -53,21 +79,27 @@ def main() -> None:
     invoice = ln_sub.add_parser("invoice", help="create invoice")
     invoice.add_argument("--node", required=True, type=int)
     invoice.add_argument("--amount-msat", type=int, default=None)
-    invoice.add_argument("--label", default=None)
+    invoice.add_argument("--label", default=None)   # agent auto-generates if omitted
     invoice.add_argument("--description", default="invoice")
 
     pay = ln_sub.add_parser("pay", help="pay invoice")
     pay.add_argument("--from-node", required=True, type=int)
     pay.add_argument("--bolt11", required=True)
 
-    # Deliberate LLM
+    # ── ask ───────────────────────────────────────────────────────────────────
+    # Deliberate spend gate: --llm must be explicitly provided to authorize
+    # LLM API usage. Without it the command exits with an error. This prevents
+    # scripted callers from accidentally triggering paid API calls.
     ask = sub.add_parser("ask", help="Freeform request (USES LLM ONLY IF --llm)")
     ask.add_argument("--llm", action="store_true", help="Explicitly allow LLM spend for this request")
     ask.add_argument("text")
 
+    # ── last ──────────────────────────────────────────────────────────────────
     sub.add_parser("last", help="Print last outbox entry")
 
     args = p.parse_args()
+
+    # ── Dispatch ──────────────────────────────────────────────────────────────
 
     if args.cmd == "health":
         msg = enqueue(
@@ -129,7 +161,7 @@ def main() -> None:
                     "kind": "ln_invoice",
                     "node": args.node,
                     "amount_msat": args.amount_msat,
-                    "label": args.label,  # agent will generate if None
+                    "label": args.label,          # agent will generate a unique label if None
                     "description": args.description,
                 },
             )
@@ -145,8 +177,8 @@ def main() -> None:
         return
 
     if args.cmd == "ask":
-        # Deliberate spend: require --llm
         if not args.llm:
+            # Explicit gate: refuse to use LLM without explicit opt-in
             raise SystemExit("Refusing to use LLM without --llm (to avoid spending credits).")
         msg = enqueue(
             args.text,

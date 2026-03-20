@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from ai.controllers.shared import (
+    _env_float,
+    _env_int,
+    _get_node_count,
+    _repair_json,
+    _strip_code_fences,
+)
 from ai.llm.base import LLMBackend, LLMError, LLMRequest
 from ai.models import ExecutionPlan, IntentBlock, PlanStep
 from ai.tools import TOOL_REQUIRED, llm_tools_schema_text
@@ -16,28 +22,34 @@ from ai.tools import TOOL_REQUIRED, llm_tools_schema_text
 # =============================================================================
 
 class PlannerError(Exception):
-    """Raised when the Planner cannot produce a valid ExecutionPlan."""
+    """
+    Raised when the Planner cannot produce a valid ExecutionPlan after all
+    retry attempts are exhausted. The pipeline coordinator catches this and
+    returns a stage_failed="planner" result to the UI.
+    """
 
 
 # =============================================================================
 # Config
 # =============================================================================
 
+# Set of valid on_error values for individual plan steps. Used in validation.
+# abort  → stop execution immediately and report failure
+# retry  → re-attempt the tool call up to max_retries times
+# skip   → mark the step as skipped and continue to the next step
 _VALID_ON_ERROR = {"abort", "retry", "skip"}
-
-
-def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    return default if v is None or v.strip() == "" else int(v)
-
-
-def _env_float(name: str, default: float) -> float:
-    v = os.getenv(name)
-    return default if v is None or v.strip() == "" else float(v)
 
 
 @dataclass(frozen=True)
 class PlannerConfig:
+    """
+    Immutable configuration for the Planner LLM call.
+
+    max_output_tokens: 1024 is generous for multi-step plans (typically
+      3-6 steps). Larger plans may be a sign the LLM is adding unnecessary steps.
+    temperature: Very low (0.1) — planning requires precise, deterministic JSON.
+    max_retries: Up to 2 additional self-correction attempts after first failure.
+    """
     max_output_tokens: int = 1024
     temperature: float = 0.1
     max_retries: int = 2
@@ -55,6 +67,9 @@ class PlannerConfig:
 # Planner
 # =============================================================================
 
+# System prompt for the planning LLM call.
+# {node_count} and {tools_schema} are injected at runtime.
+# The plan format is strict JSON with no markdown to keep parsing simple.
 _SYSTEM_PROMPT_TMPL = """\
 You are a Lightning Network execution planner.
 
@@ -81,25 +96,41 @@ Rules:
 - Use ONLY the tools listed below. Do not invent tool names.
 - All required args must be present. For args not yet known (e.g. a bolt11 from a prior step),
   use a placeholder like "$step1.result.payload.bolt11".
+- Do NOT invent placeholder names like "$agent.wallet". Only use "$stepN.path" placeholders
+  referencing actual prior step results, or literal values.
 - Use "abort" for critical steps, "skip" for optional reads, "retry" only if retrying makes sense.
-- Produce the minimal set of steps — no extra reads unless necessary.
+- Produce the minimal set of steps — no extra reads unless necessary. Do NOT repeat the same
+  tool call multiple times unless there is a clear reason.
 - If the intent is "noop" or has no clear tool path, return "steps": [].
+- Available nodes in this regtest environment: 1 through {node_count}. Do NOT use node numbers outside this range.
+- The default Bitcoin wallet is "miner". Use wallet_name="miner" for btc_wallet_ensure.
+- For diagnostics or status checks, use "network_health" — it returns node statuses and
+  blockchain info in a single call. Do not call ln_node_status for each node separately.
+- For balance queries, use "ln_listfunds" to get on-chain and channel balances.
 
 {tools_schema}"""
 
 
-def _strip_code_fences(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
 
 
 def _validate_plan_steps(steps: List[Dict[str, Any]]) -> Optional[str]:
-    """Validate raw step dicts from LLM output. Returns error string or None."""
+    """
+    Validate raw step dicts from LLM output before constructing PlanStep objects.
+    Returns a human-readable error string on the first validation failure,
+    or None if all steps are valid.
+
+    Checks:
+      - step_id is a positive integer (not a bool, not zero, not string)
+      - step_id values are unique within the plan
+      - tool name is in the known TOOL_REQUIRED registry
+      - args is a dict
+      - all required args for the tool are present
+      - on_error is one of the valid values
+    """
     seen_ids: set = set()
     for i, s in enumerate(steps):
         step_id = s.get("step_id")
+        # isinstance(True, int) is True in Python, so explicitly exclude bool
         if not isinstance(step_id, int) or isinstance(step_id, bool) or step_id < 1:
             return f"step[{i}] has invalid step_id: {step_id!r}"
         if step_id in seen_ids:
@@ -114,6 +145,9 @@ def _validate_plan_steps(steps: List[Dict[str, Any]]) -> Optional[str]:
         if not isinstance(args, dict):
             return f"step {step_id}: args must be a dict"
 
+        # Check required args — but allow $stepN.path placeholders for args that
+        # will be resolved at execution time. We only verify the key is present,
+        # not its value format.
         for req_key in TOOL_REQUIRED.get(tool, []):
             if req_key not in args:
                 return f"step {step_id}: tool '{tool}' missing required arg '{req_key}'"
@@ -126,6 +160,22 @@ def _validate_plan_steps(steps: List[Dict[str, Any]]) -> Optional[str]:
 
 
 class Planner:
+    """
+    Stage 2 of the pipeline: converts a structured IntentBlock into an
+    ordered ExecutionPlan of MCP tool calls using a single LLM call.
+
+    The plan contains:
+      - A list of PlanStep objects (tool name, args, on_error policy, etc.)
+      - A human-readable plan_rationale for display in the UI
+
+    Placeholder args like "$step1.result.payload.bolt11" allow later steps to
+    reference outputs from earlier steps. These are resolved by the Executor
+    at runtime, not by the Planner.
+
+    Retry logic is identical to the Translator: on parse failure, the error
+    is fed back to the LLM for self-correction.
+    """
+
     def __init__(
         self,
         config: PlannerConfig,
@@ -138,11 +188,21 @@ class Planner:
 
     def plan(self, intent: IntentBlock, req_id: int) -> ExecutionPlan:
         """
-        Produce an ExecutionPlan from an IntentBlock via a single LLM call.
+        Produce an ExecutionPlan from an IntentBlock.
+
+        The intent is serialized to JSON and sent as the user message.
+        The LLM is asked to produce a minimal, ordered plan using only
+        the available MCP tools.
+
         Retries up to config.max_retries on parse/validation failure.
         Raises PlannerError if all attempts fail.
         """
-        system_prompt = _SYSTEM_PROMPT_TMPL.format(tools_schema=llm_tools_schema_text())
+        # Build system prompt with current tool schema and node count injected
+        system_prompt = _SYSTEM_PROMPT_TMPL.format(
+            tools_schema=llm_tools_schema_text(),
+            node_count=_get_node_count(),
+        )
+        # Send the full intent as structured JSON so the LLM has all context
         user_content = json.dumps(intent.to_dict(), ensure_ascii=False, indent=2)
 
         messages: List[Dict[str, Any]] = [
@@ -162,7 +222,7 @@ class Planner:
             try:
                 req = LLMRequest(
                     messages=messages,
-                    tools=[],
+                    tools=[],  # No tool calling — pure text completion for JSON output
                     max_output_tokens=self.config.max_output_tokens,
                     temperature=self.config.temperature,
                 )
@@ -198,6 +258,7 @@ class Planner:
                     "attempt": attempt,
                     "error": last_error,
                 })
+                # Append the LLM's bad output and our error so it can self-correct
                 if attempt <= self.config.max_retries:
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
@@ -215,7 +276,15 @@ class Planner:
         )
 
     def _parse_plan(self, content: str, intent: IntentBlock) -> ExecutionPlan:
+        """
+        Parse, repair, validate, and construct an ExecutionPlan from raw LLM text.
+
+        Raises ValueError on any structural problem so the retry loop can
+        catch it uniformly. The intent is threaded through so the ExecutionPlan
+        can reference it for context during execution (e.g. $context.from_node).
+        """
         cleaned = _strip_code_fences(content)
+        cleaned = _repair_json(cleaned)
 
         try:
             obj = json.loads(cleaned)
@@ -231,6 +300,7 @@ class Planner:
         if not isinstance(steps_raw, list):
             raise ValueError("'steps' must be a list")
 
+        # Validate before constructing typed objects to get clean error messages
         err = _validate_plan_steps(steps_raw)
         if err:
             raise ValueError(f"Plan validation failed: {err}")

@@ -1,3 +1,32 @@
+from __future__ import annotations
+
+# =============================================================================
+# OpenAIBackend — GPT-4o and compatible models via the OpenAI Python SDK
+#
+# Uses the openai SDK's chat.completions.create() method. The OpenAI API
+# natively uses the same message/tool format we use internally (our format
+# is modeled on OpenAI's), so no format conversion is needed.
+#
+# Tool calls:
+#   When finish_reason="tool_calls", choice.message.tool_calls contains one or
+#   more tool call objects. Each has function.name and function.arguments (a
+#   JSON string). _parse_args() decodes the arguments string.
+#
+# Error mapping:
+#   The openai SDK raises a hierarchy of exceptions. We map them to our
+#   normalized LLMError subclasses by inspecting the exception message string,
+#   since the SDK's exception hierarchy varies across SDK versions.
+#
+# Compatibility:
+#   Also works with Azure OpenAI and any endpoint that implements the OpenAI
+#   chat completions API (e.g. LM Studio, vLLM with OpenAI-compatible mode)
+#   by setting OPENAI_API_KEY and pointing the SDK to the right base URL.
+#
+# Env vars:
+#   OPENAI_API_KEY   — required
+#   OPENAI_MODEL     — model name (default: "gpt-4o")
+# =============================================================================
+
 import json
 import os
 from typing import Any, Dict, List, Optional
@@ -17,6 +46,15 @@ from ai.llm.base import (
 
 
 def _parse_args(raw: Any) -> Dict[str, Any]:
+    """
+    Decode tool call arguments from the OpenAI response.
+
+    The OpenAI API returns function.arguments as a JSON string (not a dict).
+    This function handles all three shapes that may appear:
+      None   → {}
+      dict   → returned as-is (defensive: some SDKs may pre-parse)
+      str    → parsed as JSON; non-dict result → {}
+    """
     if raw is None:
         return {}
     if isinstance(raw, dict):
@@ -31,6 +69,12 @@ def _parse_args(raw: Any) -> Dict[str, Any]:
 
 
 class OpenAIBackend(LLMBackend):
+    """
+    LLMBackend implementation for OpenAI's chat completions API.
+
+    No message format conversion needed — our internal format mirrors OpenAI's.
+    Tool schemas are passed directly as the `tools` parameter.
+    """
 
     def __init__(self, model: Optional[str] = None) -> None:
         api_key = os.getenv("OPENAI_API_KEY")
@@ -41,6 +85,13 @@ class OpenAIBackend(LLMBackend):
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
 
     def step(self, request: LLMRequest) -> LLMResponse:
+        """
+        Send a chat completions request to OpenAI and return a normalized response.
+
+        Tools are only included in the API call if the request has tools — this
+        avoids unnecessary schema overhead for pure text completion calls (e.g.
+        the Translator and Summarizer stages which use tools=[]).
+        """
         try:
             kwargs: Dict[str, Any] = {
                 "model": self.model,
@@ -48,11 +99,17 @@ class OpenAIBackend(LLMBackend):
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
             }
+            # Only pass `tools` when there are tools — avoids API errors on
+            # some model endpoints that don't support the tools parameter.
             if request.tools:
                 kwargs["tools"] = request.tools
 
             response = self.client.chat.completions.create(**kwargs)
+
         except Exception as e:
+            # Map openai SDK exceptions to normalized error types by string matching.
+            # This is fragile but necessary because the SDK's exception hierarchy
+            # changed between versions. Ordered from most specific to least specific.
             msg = str(e)
             if "401" in msg or "authentication" in msg.lower() or "api_key" in msg.lower():
                 raise AuthError(msg) from e
@@ -64,6 +121,7 @@ class OpenAIBackend(LLMBackend):
 
         choice = response.choices[0]
 
+        # Extract token usage if available (strongly recommended for rate limiting)
         usage: Optional[LLMUsage] = None
         if response.usage:
             usage = LLMUsage(
@@ -72,6 +130,7 @@ class OpenAIBackend(LLMBackend):
                 total_tokens=response.usage.total_tokens,
             )
 
+        # OpenAI signals a tool call via finish_reason="tool_calls"
         if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
             tool_calls = [
                 ToolCall(
@@ -83,11 +142,12 @@ class OpenAIBackend(LLMBackend):
             return LLMResponse(
                 type="tool_call",
                 tool_calls=tool_calls,
-                content=choice.message.content,
+                content=choice.message.content,  # May contain reasoning text alongside tool calls
                 reasoning=None,
                 usage=usage,
             )
 
+        # Plain text response (finish_reason="stop" or "length")
         return LLMResponse(
             type="final",
             tool_calls=[],
