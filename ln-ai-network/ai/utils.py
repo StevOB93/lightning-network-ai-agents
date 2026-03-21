@@ -81,11 +81,36 @@ class StartupLock:
                     # LOCK_NB causes immediate raise instead of blocking
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    # Another process holds the lock — read its PID for the error message
+                    # Another process holds the flock — read its PID and check
+                    # whether that process is actually alive before failing.
+                    # On some Linux kernels (and WSL2) a killed process may
+                    # hold the flock briefly after death; if the PID no longer
+                    # exists the lock is stale and safe to steal.
                     fh.seek(0)
                     existing = fh.read().strip()
-                    msg = existing or f"Another {self._name} instance holds the lock."
-                    raise RuntimeError(msg)
+                    stale = False
+                    if existing:
+                        try:
+                            pid = int(existing.split()[0].replace("pid=", ""))
+                            os.kill(pid, 0)  # signal 0 = existence check only
+                        except (ValueError, ProcessLookupError):
+                            stale = True  # PID gone — lock is stale
+                        except PermissionError:
+                            pass  # process exists but owned by another user
+                    if stale:
+                        # Clear the stale lock file and block until we own it
+                        print(
+                            f"[StartupLock] stale lock detected (pid not running); "
+                            f"stealing: {self.lock_path}",
+                            flush=True,
+                        )
+                        fh.seek(0)
+                        fh.truncate()
+                        fh.flush()
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                    else:
+                        msg = existing or f"Another {self._name} instance holds the lock."
+                        raise RuntimeError(msg)
 
             # We own the lock — write our identity so operators can debug
             fh.seek(0)
