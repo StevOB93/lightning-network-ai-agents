@@ -107,6 +107,13 @@ Rules:
 - For diagnostics or status checks, use "network_health" — it returns node statuses and
   blockchain info in a single call. Do not call ln_node_status for each node separately.
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
+- To connect two nodes as peers (ln_connect): you MUST first ensure node 2 is running
+  (ln_node_status → ln_node_start if needed), then call ln_getinfo(node=2) to get the
+  pubkey and address. The peer_id for ln_connect is payload.id from ln_getinfo (a hex
+  string, NOT the node number). The host is payload.binding[0].address (or "127.0.0.1"
+  for same-machine). The port is payload.binding[0].port (NOT the node number). Minimal
+  plan: ln_node_start(node=2) → ln_getinfo(node=2) → ln_connect(from_node=1,
+  peer_id=$step2.result.payload.id, host="127.0.0.1", port=$step2.result.payload.binding[0].port).
 - For cross-machine Lightning peer connectivity (user explicitly asks to make a node reachable
   FROM ANOTHER MACHINE / remote host / different computer): call sys_netinfo to get
   default_outbound_ip, then ln_node_stop + ln_node_start with bind_host="0.0.0.0" and
