@@ -34,20 +34,47 @@ def _env_float(name: str, default: float) -> float:
 
 def _get_node_count() -> int:
     """
-    Read the active node count from runtime/node_count.
+    Read the number of active Lightning Network nodes from runtime/node_count.
 
-    Written by the launcher when nodes start. Falls back to 2 (standard regtest
-    pair) if the file is absent or unreadable. Read on every call so changes to
-    the node count take effect without restarting the pipeline.
+    This file is written by the network setup/launcher scripts when nodes start.
+    It tells the agent which node numbers are valid targets for tool calls (e.g.
+    node=1 through node=N). Reading it on every call means changes to the node
+    count (e.g. adding a third node) take effect without restarting the pipeline.
 
-    Path resolution: walks up from this file (ai/controllers/shared.py) to the
-    repo root (ln-ai-network/) and then into runtime/node_count.
+    Path resolution: walks up from ai/controllers/shared.py → ai/ → ln-ai-network/
+    → runtime/node_count (the repo root's runtime directory).
+
+    Fallback: if the file is absent (e.g. first run before setup) or unreadable
+    (corrupt, wrong format), we fall back to 2 (the standard regtest pair). A
+    structured warning is printed so operators know the system is running on a
+    default rather than a configured value — without this warning, tool calls to
+    a non-existent node (e.g. node=3 when only 2 are running) would fail silently
+    at the MCP boundary with an opaque "node not found" error instead of a clear
+    "node_count was never set" root cause.
     """
+    _DEFAULT = 2
     try:
         p = Path(__file__).resolve().parent.parent.parent / "runtime" / "node_count"
         return int(p.read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return 2
+    except Exception as _e:
+        # Emit a structured JSON warning to stdout (same format as pipeline logs)
+        # so it appears in the process supervisor's log alongside other events.
+        # We import json/time here (not at module level) to avoid a circular
+        # import risk — shared.py is imported very early in the module graph.
+        import json as _json
+        import time as _time
+        print(_json.dumps({
+            "ts": int(_time.time()),
+            "kind": "node_count_fallback",
+            "default": _DEFAULT,
+            "reason": str(_e),
+            "msg": (
+                f"Could not read runtime/node_count ({_e}); "
+                f"defaulting to {_DEFAULT} nodes. "
+                "Run the network setup script to write this file."
+            ),
+        }), flush=True)
+        return _DEFAULT
 
 
 def _strip_code_fences(text: str) -> str:
@@ -91,10 +118,16 @@ def _repair_json(text: str) -> str:
     text = re.sub(r',\s*([}\]])', r'\1', text)
     # Replace single quotes with double quotes (simple cases only)
     text = re.sub(r"(?<![\"\\])'([^']*)'", r'"\1"', text)
-    # Fix missing commas between array elements: "foo"\n"bar" → "foo",\n"bar"
-    text = re.sub(r'"\s*\n\s*"', '",\n"', text)
-    # Fix missing commas between object fields: value\n  "key": → value,\n  "key":
-    text = re.sub(r'([\}\]"\d])\s*\n(\s*"[^"]+"\s*:)', r'\1,\n\2', text)
+    # Fix missing commas between adjacent string values (array elements or object values).
+    # Uses \s+ (not \s*\n) so it catches both newline-separated and same-line cases,
+    # e.g. "foo" "bar" or "foo"\n"bar" → "foo",\n"bar"
+    text = re.sub(r'"\s+"', '",\n"', text)
+    # Fix missing commas between object fields: value whitespace "key": → value,\n"key":
+    # The first group covers all value-ending tokens:
+    #   [\}\]"\d]  — closing brace/bracket, closing string quote, digit
+    #   null|true|false — JSON literal values (their last char isn't in the class above)
+    # Uses \s+ so it catches both } "key": (same line) and }\n "key": (newline) cases.
+    text = re.sub(r'(null|true|false|[\}\]"\d])\s+(\s*"[^"]+"\s*:)', r'\1,\n\2', text)
     # Strip any text after the final closing brace (e.g. trailing explanation)
     m = re.search(r'\}[^}]*$', text)
     if m:

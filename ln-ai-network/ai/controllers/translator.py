@@ -307,7 +307,7 @@ class Translator:
         # Final safety gate: validate against intent_validate rules.
         # This catches dangerous operations like invoicing absurd amounts
         # or targeting non-existent nodes.
-        ok, reason = validate_intent_safety({"intent": intent.intent_type, **intent.context})
+        ok, reason = validate_intent_safety({"intent_type": intent.intent_type, **intent.context})
         if not ok:
             raise ValueError(f"Intent failed safety check: {reason}")
 

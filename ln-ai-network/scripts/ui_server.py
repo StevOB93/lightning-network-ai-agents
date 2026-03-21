@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +32,24 @@ from urllib.parse import parse_qs, urlparse
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web"
 RUNTIME_DIR = REPO_ROOT / "runtime" / "agent"
+ENV_FILE = REPO_ROOT / ".env"
+
+# Config keys that may be read/written via /api/config.
+# API keys are intentionally excluded — they must be set manually in .env.
+_CONFIG_KEYS: frozenset[str] = frozenset({
+    "LLM_BACKEND",
+    "OPENAI_MODEL",
+    "OLLAMA_MODEL",
+    "OLLAMA_BASE_URL",
+    "MCP_CALL_TIMEOUT_S",
+    "MCP_NODE_START_TIMEOUT_S",
+    "MCP_NODE_STOP_TIMEOUT_S",
+    "LN_BIND_HOST",
+    "LN_ANNOUNCE_HOST",
+    "REGTEST_TARGET_HEIGHT",
+    "UI_HOST",
+    "UI_PORT",
+})
 
 # Ensure the repo root is on sys.path so we can import ai.* and mcp.*
 if str(REPO_ROOT) not in sys.path:
@@ -161,6 +181,9 @@ def _compute_metrics() -> dict[str, Any]:
     status_counts: dict[str, int] = {"ok": 0, "partial": 0, "failed": 0}
     stage_failure_counts: dict[str, int] = {}
     durations: list[float] = []
+    stage_timing_ms: dict[str, list[float]] = {
+        "translator": [], "planner": [], "executor": [], "summarizer": []
+    }
     total = 0
 
     for p in logs_dir.glob("*.jsonl"):
@@ -173,7 +196,7 @@ def _compute_metrics() -> dict[str, Any]:
         if file_status in status_counts:
             status_counts[file_status] += 1
 
-        # Read the file to gather stage_failed events and timestamps
+        # Read the file to gather stage_failed events, timestamps, and stage timing
         timestamps: list[float] = []
         try:
             lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -195,6 +218,12 @@ def _compute_metrics() -> dict[str, Any]:
                 stage = ev.get("stage_failed")
                 if stage and isinstance(stage, str):
                     stage_failure_counts[stage] = stage_failure_counts.get(stage, 0) + 1
+                # Collect per-stage timing from stage_timing events
+                if ev.get("event") == "stage_timing":
+                    for key in ("translator", "planner", "executor", "summarizer"):
+                        val = ev.get(f"{key}_ms")
+                        if isinstance(val, (int, float)) and val >= 0:
+                            stage_timing_ms[key].append(float(val))
         except Exception:
             pass  # Unreadable file — skip it
 
@@ -204,12 +233,19 @@ def _compute_metrics() -> dict[str, Any]:
     success_rate = (status_counts.get("ok", 0) / total) if total > 0 else 0.0
     avg_duration_s = (sum(durations) / len(durations)) if durations else None
 
+    # Compute per-stage average timing (None if no data for that stage)
+    avg_stage_ms = {
+        stage: round(sum(vals) / len(vals), 1) if vals else None
+        for stage, vals in stage_timing_ms.items()
+    }
+
     return {
         "total_queries": total,
         "status_counts": status_counts,
         "success_rate": success_rate,
         "stage_failure_counts": stage_failure_counts,
         "avg_duration_s": avg_duration_s,
+        "avg_stage_ms": avg_stage_ms,
     }
 
 
@@ -369,6 +405,14 @@ def _extract_network_data() -> dict[str, Any]:
 # Runtime snapshot
 # ---------------------------------------------------------------------------
 
+def _read_node_count() -> int:
+    """Read the node count written by 1.start.sh to runtime/node_count."""
+    try:
+        return int((REPO_ROOT / "runtime" / "node_count").read_text(encoding="utf-8").strip())
+    except Exception:
+        return 0
+
+
 def _runtime_snapshot() -> dict[str, Any]:
     """
     Build a lightweight status snapshot for the status bar and queue panels.
@@ -400,6 +444,111 @@ def _runtime_snapshot() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Crash kit
+# ---------------------------------------------------------------------------
+
+def _crash_kit() -> dict[str, Any]:
+    """
+    Build a comprehensive debug snapshot for bug reports.
+
+    Collects everything a developer would need to diagnose a runtime problem:
+    system info, node count, current config (non-sensitive), runtime lock status,
+    recent queue entries, last pipeline result, recent trace events, and metrics.
+
+    All data is gathered in a single call so the snapshot is consistent in time.
+    """
+    import platform
+    return {
+        "generated_at": time.time(),
+        "system": {
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "node_count": _read_node_count(),
+        },
+        "runtime": _runtime_snapshot(),
+        "pipeline_result": _latest_pipeline_result(),
+        "trace": _read_trace_tail(limit=100),
+        "metrics": _compute_metrics(),
+        "config": _read_config(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Config read / write
+# ---------------------------------------------------------------------------
+
+def _read_env_file() -> dict[str, str]:
+    """
+    Parse .env as KEY=VALUE lines, skipping comments and blank lines.
+    Returns an empty dict if the file doesn't exist.
+    """
+    result: dict[str, str] = {}
+    if not ENV_FILE.exists():
+        return result
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            result[key.strip()] = val.strip()
+    return result
+
+
+def _read_config() -> dict[str, Any]:
+    """
+    Return current values for all allowed config keys.
+
+    Priority: live env var (set at process start) → .env file value → empty string.
+    Both sources are returned so the UI can distinguish "saved in .env" from
+    "only in current environment (not persisted)".
+    """
+    env_file = _read_env_file()
+    result: dict[str, Any] = {}
+    for key in _CONFIG_KEYS:
+        result[key] = os.getenv(key, env_file.get(key, ""))
+    return result
+
+
+def _write_config(updates: dict[str, str]) -> None:
+    """
+    Merge updates into .env, preserving existing lines and comments.
+
+    Only keys in _CONFIG_KEYS are accepted; unknown keys are silently dropped.
+    Existing lines for a key are updated in-place; new keys are appended at the end.
+    """
+    filtered = {k: v for k, v in updates.items() if k in _CONFIG_KEYS}
+    if not filtered:
+        return
+
+    existing_lines: list[str] = []
+    if ENV_FILE.exists():
+        existing_lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+
+    updated_keys: set[str] = set()
+    new_lines: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            new_lines.append(line)
+            continue
+        if "=" in stripped:
+            key = stripped.partition("=")[0].strip()
+            if key in filtered:
+                new_lines.append(f"{key}={filtered[key]}")
+                updated_keys.add(key)
+                continue
+        new_lines.append(line)
+
+    # Append keys not already present in the file
+    for key, val in filtered.items():
+        if key not in updated_keys:
+            new_lines.append(f"{key}={val}")
+
+    ENV_FILE.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
@@ -414,12 +563,17 @@ class UIHandler(BaseHTTPRequestHandler):
       /api/network        → live network topology (calls MCP tools)
       /api/logs           → archive list metadata (newest-first)
       /api/logs/{name}    → full events for one archive file
+      /api/config         → current values for all allowed config keys
       /api/stream         → SSE stream of live updates
+      /api/tokens         → SSE stream of LLM summary tokens (near-real-time)
       /*                  → static files from web/
 
     POST endpoints:
       /api/ask            → enqueue a freeform prompt for the pipeline
       /api/health         → enqueue a health check ping
+      /api/config         → write/merge key-value pairs into .env file
+      /api/shutdown       → run scripts/shutdown.sh (stops all processes)
+      /api/restart        → run shutdown.sh then 1.start.sh (full system restart)
     """
 
     server_version = "LightningAgentUI/2.0"
@@ -524,8 +678,14 @@ class UIHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, result)
         elif route == "/api/metrics":
             self._json(HTTPStatus.OK, _compute_metrics())
+        elif route == "/api/crash_kit":
+            self._json(HTTPStatus.OK, _crash_kit())
+        elif route == "/api/config":
+            self._json(HTTPStatus.OK, _read_config())
         elif route == "/api/stream":
             self._sse_stream()
+        elif route == "/api/tokens":
+            self._sse_tokens()
         else:
             self._serve_static(parsed.path)
 
@@ -631,6 +791,71 @@ class UIHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass  # Client disconnected cleanly — no error logging needed
 
+    def _sse_tokens(self) -> None:
+        """
+        Server-Sent Events endpoint for streaming LLM summary tokens.
+
+        Tails runtime/agent/stream.jsonl starting from the current end-of-file
+        so only tokens generated after the client connects are delivered. Polls
+        at 50ms intervals for near-real-time delivery.
+
+        Event type: always "token". Data is the raw JSON object from stream.jsonl:
+          {"event": "stream_start", "req_id": N, "ts": ...}  — new query started
+          {"event": "token",        "text":  "..."}           — one LLM token chunk
+          {"event": "stream_end",   "req_id": N, "ts": ...}  — summarizer done
+
+        The browser uses stream_start/stream_end to show/hide a typing cursor
+        and to know when the streaming preview is complete.
+        """
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def send(data: Any) -> bool:
+            try:
+                msg = f"event: token\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                self.wfile.write(msg.encode("utf-8"))
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return False
+
+        stream_path = RUNTIME_DIR / "stream.jsonl"
+        # Seek to end of current file — only deliver tokens written after connect.
+        # This prevents replaying old query tokens to newly-connected clients.
+        pos = stream_path.stat().st_size if stream_path.exists() else 0
+
+        try:
+            while True:
+                time.sleep(0.05)  # 50ms — fast enough for near-real-time token display
+                if not stream_path.exists():
+                    continue
+                try:
+                    with stream_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                        fh.seek(pos)
+                        new_content = fh.read()
+                        pos = fh.tell()
+                except Exception:
+                    continue
+                if not new_content:
+                    continue
+                for line in new_content.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if not send(obj):
+                        return
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def do_POST(self) -> None:  # noqa: N802
         """
         Handle POST requests for /api/ask and /api/health.
@@ -665,6 +890,65 @@ class UIHandler(BaseHTTPRequestHandler):
             # with "Pipeline is running." — useful for monitoring scripts.
             msg = enqueue("health_check", meta={"kind": "health_check", "include_raw": False})
             self._json(HTTPStatus.OK, {"queued": "health_check", "msg": msg})
+
+        elif parsed.path == "/api/config":
+            # Update .env with the provided key-value pairs (allowlisted keys only).
+            if not isinstance(data, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "Expected JSON object"})
+                return
+            _write_config({str(k): str(v) for k, v in data.items()})
+            self._json(HTTPStatus.OK, {"saved": [k for k in data if k in _CONFIG_KEYS]})
+
+        elif parsed.path == "/api/shutdown":
+            # Run shutdown.sh in a background thread so the HTTP response is sent
+            # before the process tree is terminated.
+            shutdown_script = REPO_ROOT / "scripts" / "shutdown.sh"
+            if not shutdown_script.exists():
+                self._json(HTTPStatus.NOT_FOUND, {"error": "shutdown.sh not found"})
+                return
+            self._json(HTTPStatus.OK, {"status": "shutdown_initiated"})
+
+            def _do_shutdown() -> None:
+                # Small delay ensures the HTTP response flushes before shutdown
+                # kills the UI server process.
+                time.sleep(0.5)
+                try:
+                    subprocess.Popen(
+                        ["bash", str(shutdown_script)],
+                        cwd=str(REPO_ROOT),
+                        # Detach from the current process group so it survives
+                        # even if the UI server dies first.
+                        start_new_session=True,
+                    )
+                except Exception as exc:
+                    print(f"[ERROR] Failed to launch shutdown.sh: {exc}", flush=True)
+
+            threading.Thread(target=_do_shutdown, daemon=True).start()
+
+        elif parsed.path == "/api/restart":
+            shutdown_script = REPO_ROOT / "scripts" / "shutdown.sh"
+            start_script    = REPO_ROOT / "scripts" / "1.start.sh"
+            if not shutdown_script.exists() or not start_script.exists():
+                self._json(HTTPStatus.NOT_FOUND, {"error": "shutdown.sh or 1.start.sh not found"})
+                return
+            self._json(HTTPStatus.OK, {"status": "restart_initiated"})
+
+            def _do_restart() -> None:
+                time.sleep(0.5)
+                try:
+                    # Run shutdown then start as one detached sequence.
+                    # start_new_session=True ensures this process survives
+                    # the UI server being killed by shutdown.sh.
+                    subprocess.Popen(
+                        ["bash", "-c",
+                         f"bash '{shutdown_script}' && bash '{start_script}'"],
+                        cwd=str(REPO_ROOT),
+                        start_new_session=True,
+                    )
+                except Exception as exc:
+                    print(f"[ERROR] Failed to launch restart sequence: {exc}", flush=True)
+
+            threading.Thread(target=_do_restart, daemon=True).start()
 
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint"})

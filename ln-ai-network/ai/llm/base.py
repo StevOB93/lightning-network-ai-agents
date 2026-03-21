@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Literal
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Literal
 
 
 # =============================================================================
@@ -195,6 +195,26 @@ class LLMBackend(ABC):
         Raises LLMError subclasses on failure — never raw provider exceptions.
         """
         raise NotImplementedError
+
+    def stream(self, request: LLMRequest) -> Iterable[str]:
+        """
+        Stream text tokens from the provider, yielding each chunk as a string.
+
+        Used for user-visible output (e.g. summarizer stage) where lower
+        time-to-first-token improves the perceived experience.
+
+        Default implementation: calls step() and yields the complete content
+        string as a single chunk. Backends with native streaming support should
+        override this to yield tokens incrementally.
+
+        Only valid for text-generation requests (tools=[]). Callers should fall
+        back to step() if they need tool-call support.
+
+        Raises LLMError subclasses on failure.
+        """
+        resp = self.step(request)
+        if resp.content:
+            yield resp.content
 
     def token_estimator(self) -> Optional[TokenEstimator]:
         """

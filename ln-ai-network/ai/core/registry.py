@@ -132,6 +132,10 @@ class AgentRegistry:
 
         The message dict should follow the same shape as normal inbox
         messages: {"id": N, "content": "...", "meta": {"kind": "freeform", ...}}.
+
+        To receive a reply, include reply_id (a unique string) and reply_inbox
+        (path to your own inbox) in the message. The recipient can then call
+        route_to() back with {"in_reply_to": reply_id} in the message body.
         """
         peer = self.find_peer(kind, node)
         if peer is None:
@@ -148,6 +152,45 @@ class AgentRegistry:
             return True
         except Exception:
             return False
+
+    def await_reply(
+        self,
+        reply_id: str,
+        inbox_path: Path,
+        timeout_s: float = 10.0,
+        poll_interval_s: float = 0.1,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Poll an inbox file for a reply message matching reply_id.
+
+        When routing a message, set {"reply_id": <id>, "reply_inbox": str(inbox_path)}
+        in the message so the recipient can write the reply back. This method then
+        waits up to timeout_s seconds for a matching {"in_reply_to": <id>} record.
+
+        Returns the reply message dict on success, None on timeout.
+        """
+        import time as _time
+        deadline = _time.monotonic() + timeout_s
+        seen_lines = 0
+        while _time.monotonic() < deadline:
+            if inbox_path.exists():
+                try:
+                    lines = inbox_path.read_text(encoding="utf-8").splitlines()
+                except Exception:
+                    lines = []
+                for line in lines[seen_lines:]:
+                    seen_lines = len(lines)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        if record.get("in_reply_to") == reply_id:
+                            return record
+                    except json.JSONDecodeError:
+                        continue
+            _time.sleep(poll_interval_s)
+        return None
 
     # ── Cleanup ────────────────────────────────────────────────────────────────
 

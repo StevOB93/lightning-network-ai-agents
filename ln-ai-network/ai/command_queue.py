@@ -119,19 +119,25 @@ def _next_id() -> int:
     qp = ensure()
     with qp.counter.open("r+", encoding="utf-8") as f:
         _lock(f)
-        raw = f.read().strip() or "0"
         try:
-            n = int(raw)
-        except Exception:
-            n = 0
-        n += 1
-        f.seek(0)
-        f.truncate()
-        f.write(str(n))
-        f.flush()
-        os.fsync(f.fileno())  # Durable before unlock
-        _unlock(f)
-        return n
+            raw = f.read().strip() or "0"
+            try:
+                n = int(raw)
+            except Exception:
+                n = 0
+            n += 1
+            f.seek(0)
+            f.truncate()
+            f.write(str(n))
+            f.flush()
+            os.fsync(f.fileno())  # Durable before unlock
+            return n
+        finally:
+            # Always release the lock, even if fsync() or write() raises (e.g.
+            # disk full). The 'with' block closing the file handle would also
+            # release the flock, but doing it explicitly here minimises the
+            # window between exception and release.
+            _unlock(f)
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -161,10 +167,12 @@ def enqueue(content: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, An
     line = json.dumps(msg, ensure_ascii=False) + "\n"
     with qp.inbox.open("a", encoding="utf-8") as f:
         _lock(f)
-        f.write(line)
-        f.flush()
-        os.fsync(f.fileno())  # Force to disk before releasing lock
-        _unlock(f)
+        try:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())  # Force to disk before releasing lock
+        finally:
+            _unlock(f)
 
     return msg
 
@@ -236,10 +244,12 @@ def write_outbox(entry: Dict[str, Any]) -> None:
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     with qp.outbox.open("a", encoding="utf-8") as f:
         _lock(f)
-        f.write(line)
-        f.flush()
-        os.fsync(f.fileno())
-        _unlock(f)
+        try:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            _unlock(f)
 
 
 def last_outbox() -> Optional[Dict[str, Any]]:

@@ -107,6 +107,10 @@ Rules:
 - For diagnostics or status checks, use "network_health" — it returns node statuses and
   blockchain info in a single call. Do not call ln_node_status for each node separately.
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
+- For cross-machine Lightning peer connectivity (making a local node reachable from another
+  machine): call sys_netinfo to get default_outbound_ip, then ln_node_stop + ln_node_start
+  with bind_host="0.0.0.0" and announce_host=<default_outbound_ip>. Then call ln_getinfo to
+  get the node pubkey for the remote operator.
 
 {tools_schema}"""
 

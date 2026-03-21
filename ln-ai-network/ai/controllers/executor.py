@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ai.mcp_client import MCPClient
+from ai.mcp_client import MCPClient, MCPTimeoutError
 from ai.models import ExecutionPlan, PlanStep, StepResult
 from ai.tools import _is_tool_error, _normalize_tool_args, _summarize_tool_result
 
@@ -271,6 +273,27 @@ class Executor:
         self.mcp = mcp
         self.trace = trace  # TraceLogger shared with all pipeline stages
 
+        # Warn when parallel execution is enabled with a non-thread-safe MCP client.
+        # FastMCPClientWrapper serialises calls through a single threading.Lock, so
+        # the calls will be safe but sequential — parallel waves won't actually run
+        # concurrently. More importantly, if a different (non-locking) MCP client is
+        # ever substituted, the race condition would be silent and hard to diagnose.
+        # This warning makes the configuration choice visible in the logs immediately.
+        if self.config.max_workers > 1:
+            print(json.dumps({
+                "ts": int(time.time()),
+                "kind": "executor_config_warning",
+                "msg": (
+                    f"EXECUTOR_MAX_WORKERS={self.config.max_workers} enables parallel "
+                    "step execution. FastMCPClientWrapper (the default MCP client) "
+                    "serialises all calls through a Lock, so steps will run "
+                    "sequentially at the MCP boundary regardless. "
+                    "Only use max_workers > 1 with a connection-pooled MCP client "
+                    "that is explicitly documented as thread-safe. "
+                    "Set EXECUTOR_MAX_WORKERS=1 to suppress this warning."
+                ),
+            }), flush=True)
+
     def execute(self, plan: ExecutionPlan, req_id: int) -> List[StepResult]:
         """
         Execute plan steps in topological dependency order, running independent
@@ -490,7 +513,23 @@ class Executor:
                 "attempt": attempt + 1,  # 1-based for human readability in the trace
             })
 
-            raw = self.mcp.call(step.tool, args=norm_args)
+            try:
+                raw = self.mcp.call(step.tool, args=norm_args)
+            except MCPTimeoutError as _mcp_timeout:
+                # The MCP server did not respond within the configured deadline.
+                # Convert to an error dict so the existing on_error policy
+                # (abort/skip/retry) governs what happens next — a timeout is
+                # treated identically to a tool returning an error response.
+                # Logging here makes the timeout visible in the UI trace panel.
+                self.trace.log({
+                    "event": "tool_timeout",
+                    "stage": "executor",
+                    "req_id": req_id,
+                    "step_id": step.step_id,
+                    "tool": step.tool,
+                    "error": str(_mcp_timeout),
+                })
+                raw = {"error": str(_mcp_timeout)}
             tool_err = _is_tool_error(raw)
 
             self.trace.log({

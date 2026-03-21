@@ -208,6 +208,27 @@ run_step() {
 }
 
 ###############################################################################
+# Signal handling — clean up any running background step on SIGTERM/SIGINT
+#
+# Without this, killing 1.start.sh while it is waiting on a boot step leaves
+# that step's subprocess running as an orphan. The orphan holds ports and lock
+# files that block a subsequent restart until it is killed manually.
+#
+# _cleanup() kills all background jobs started by this shell (the current boot
+# step, and any tail -f follower). It does NOT kill lightningd or bitcoind —
+# those are managed by their own RPC stop commands and by shutdown.sh.
+# Using 'jobs -p' is intentional: it targets only direct children of this
+# script, not the Lightning/Bitcoin processes started by the boot subscripts.
+###############################################################################
+_cleanup() {
+    echo "[WARN] Signal received — stopping background steps..." >&2
+    # Kill all direct background jobs (step scripts + any tail -f followers).
+    # POSIX while-read loop avoids xargs -r which is GNU-only (breaks on macOS).
+    while IFS= read -r _pid; do kill "$_pid" 2>/dev/null || true; done < <(jobs -p)
+}
+trap '_cleanup; exit 130' TERM INT
+
+###############################################################################
 # Startup sequence
 ###############################################################################
 run_step "0.1.infra_boot"         "$PROJECT_ROOT/scripts/startup/0.1.infra_boot.sh"         "$NODE_COUNT"

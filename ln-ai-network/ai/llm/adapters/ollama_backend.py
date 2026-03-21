@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
@@ -307,3 +307,50 @@ class OllamaBackend(LLMBackend):
             reasoning=None,
             usage=usage,
         )
+
+    def stream(self, request: LLMRequest) -> Iterable[str]:
+        """
+        Stream text tokens from Ollama using the streaming chat API.
+
+        Uses Ollama's NDJSON streaming format: each line is a JSON object
+        with a "message.content" field containing the token delta. Yields
+        each non-empty content delta as it arrives.
+
+        Only suitable for text generation (tools=[]). Falls back to step()
+        semantics (single yield of complete content) if a structured tool
+        call is detected in the stream.
+        """
+        url = f"{self.base_url}/api/chat"
+        temp = float(request.temperature)
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": request.messages,
+            "stream": True,
+            "tools": request.tools or [],
+            "options": {
+                "temperature": temp,
+                "num_predict": request.max_output_tokens,
+            },
+        }
+
+        try:
+            r = requests.post(url, json=payload, timeout=self.timeout_sec, stream=True)
+        except requests.RequestException as e:
+            raise TransientAPIError(f"Ollama connection failed: {e}") from e
+
+        if 500 <= r.status_code <= 599:
+            raise TransientAPIError(f"Ollama server error {r.status_code}: {r.text}")
+        if 400 <= r.status_code <= 499:
+            raise PermanentAPIError(f"Ollama request error {r.status_code}: {r.text}")
+
+        for line in r.iter_lines():
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = data.get("message") or {}
+            content = msg.get("content")
+            if content:
+                yield str(content)

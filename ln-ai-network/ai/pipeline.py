@@ -2,9 +2,21 @@ from __future__ import annotations
 
 # Standard library
 import json
+import os
+import signal
 import time
 import traceback
 from typing import Any, Dict, List, Optional
+
+# fcntl provides advisory file locking on Unix/macOS. It is not available on
+# Windows, so we import it with a None fallback and check before each use.
+# Without locking, concurrent writes to history.jsonl (e.g. during an
+# overlapping restart) could produce partial JSON lines that break history
+# loading on the next startup.
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None  # type: ignore[assignment]  # Windows — skip locking gracefully
 
 # Internal modules
 from ai.command_queue import read_new, write_outbox
@@ -131,29 +143,92 @@ class PipelineCoordinator:
         # Loaded from disk on startup so context is preserved across restarts.
         self._history: List[Dict[str, Any]] = self._load_history()
 
+        # Hot-reload flag: set by SIGHUP handler, checked in run loop
+        self._reload_pending = False
+        # Install SIGHUP handler (SIGTERM/SIGINT already terminate cleanly via KeyboardInterrupt)
+        try:
+            signal.signal(signal.SIGHUP, self._handle_sighup)
+        except (OSError, ValueError):
+            pass  # Not on UNIX or called from a thread — skip silently
+
     def _load_history(self) -> List[Dict[str, Any]]:
         """
-        Load conversation history from disk on startup.
+        Load conversation history from disk on startup, validate each message,
+        and compact the file if it exceeds the active rolling window.
 
-        Reads the last cfg.max_history_messages * 2 lines from history.jsonl
-        so the history window is immediately populated after a restart. Lines
-        that fail to parse are silently skipped (corrupted entries don't block startup).
+        Validation: each message must have role="user"|"assistant" and a non-empty
+        string content field. Invalid entries are silently dropped. Without this
+        check, a manually edited or partially corrupted history.jsonl could inject
+        malformed messages into the LLM API request, causing a hard API error.
+
+        Compaction: if history.jsonl holds more lines than max_history_messages*2,
+        the file is rewritten with only the most recent messages. This prevents
+        unbounded file growth during long sessions — without compaction, every
+        query adds two lines to the file forever. Compaction is a non-fatal
+        best-effort operation; if the rewrite fails (e.g. disk full), the in-memory
+        history is still correct, only the on-disk file stays larger than needed.
+
+        The active rolling window (max_history_messages pairs) is what the
+        Translator actually uses; older messages are never sent to the LLM, so
+        there's no benefit to keeping them on disk.
         """
         if not self._history_path.exists():
             return []
         try:
             lines = self._history_path.read_text(encoding="utf-8").splitlines()
-            history = []
+
+            # The set of role values the Translator accepts. Any other value would
+            # be forwarded to the LLM API as-is, which most providers reject.
+            _VALID_ROLES = {"user", "assistant"}
+
+            all_parsed: List[Dict[str, Any]] = []
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    history.append(json.loads(line))
+                    obj = json.loads(line)
                 except json.JSONDecodeError:
-                    continue
+                    continue  # Skip malformed lines (e.g. from an interrupted write)
+
+                # Validate the message shape before accepting it into the history.
+                # We require:
+                #   role    — must be "user" or "assistant" (what the LLM API accepts)
+                #   content — must be a non-empty string (blank turns add noise)
+                # Any message that fails this check is silently dropped; we don't
+                # log here because this runs on every startup and would spam logs.
+                if (
+                    isinstance(obj, dict)
+                    and obj.get("role") in _VALID_ROLES
+                    and isinstance(obj.get("content"), str)
+                    and obj["content"].strip()
+                ):
+                    all_parsed.append(obj)
+
             max_msgs = self._cfg.max_history_messages * 2
-            return history[-max_msgs:] if len(history) > max_msgs else history
+            history = all_parsed[-max_msgs:] if len(all_parsed) > max_msgs else all_parsed
+
+            # Compact history.jsonl if we loaded more messages than the active window.
+            # Rewrite the file with just the trimmed slice so it doesn't grow unbounded.
+            # We lock the file during the write to prevent corruption if (unlikely)
+            # another process is simultaneously appending.
+            if len(all_parsed) > len(history):
+                try:
+                    with self._history_path.open("w", encoding="utf-8") as fh:
+                        if _fcntl is not None:
+                            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                        try:
+                            for msg in history:
+                                fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                            fh.flush()
+                            os.fsync(fh.fileno())  # Flush OS buffer to disk
+                        finally:
+                            if _fcntl is not None:
+                                _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                except Exception:
+                    pass  # Compaction failure is non-fatal — history is correct in memory
+
+            return history
         except Exception:
             return []
 
@@ -184,13 +259,63 @@ class PipelineCoordinator:
         max_msgs = self._cfg.max_history_messages * 2
         if len(self._history) > max_msgs:
             self._history = self._history[-max_msgs:]
-        # Append the new pair to disk so it survives restarts (best-effort)
+        # Append the new pair to disk so it survives restarts (best-effort).
+        # We lock the file before writing to prevent partial-line corruption if
+        # two processes overlap (e.g. a fast restart while a write is in progress).
+        # Without the lock, a crash mid-write leaves a truncated JSON line that
+        # _load_history() would silently drop on next startup, losing context.
         try:
             with self._history_path.open("a", encoding="utf-8") as fh:
-                for msg in new_msgs:
-                    fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                if _fcntl is not None:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                try:
+                    for msg in new_msgs:
+                        fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())  # Ensure bytes reach disk before unlocking
+                finally:
+                    if _fcntl is not None:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
         except Exception:
-            pass
+            pass  # History is advisory — a write failure never crashes the pipeline
+
+    def _handle_sighup(self, signum: int, frame: Any) -> None:
+        """Mark config reload as pending (processed safely in the run loop)."""
+        self._reload_pending = True
+
+    def _reload_config(self) -> None:
+        """
+        Rebuild GuardedBackend instances and refresh AgentConfig from env vars.
+
+        Called from the run loop when _reload_pending is True. Constructs a
+        new AgentConfig snapshot from the current environment and replaces
+        the three stage backends. The pipeline keeps running — in-flight
+        queries use the old backends; new queries use the new ones.
+        """
+        self._reload_pending = False
+        try:
+            new_cfg = AgentConfig.from_env()
+            translator_backend = GuardedBackend(create_backend_for_role("translator"), new_cfg)
+            planner_backend    = GuardedBackend(create_backend_for_role("planner"),     new_cfg)
+            summarizer_backend = GuardedBackend(create_backend_for_role("summarizer"),  new_cfg)
+            # Assign all three stage controllers in a single tuple unpacking statement.
+            # Python evaluates the entire right-hand side before performing any name
+            # binding, so an exception raised during construction of any one stage
+            # leaves the existing self.translator/planner/summarizer untouched.
+            # Three separate assignments would risk a half-reloaded state if the
+            # second or third constructor raised (e.g. bad env var for planner only).
+            self.translator, self.planner, self.summarizer = (
+                Translator(TranslatorConfig.from_env(), translator_backend, self.trace),
+                Planner(PlannerConfig.from_env(),       planner_backend,    self.trace),
+                Summarizer(SummarizerConfig.from_env(), summarizer_backend, self.trace),
+            )
+            # Only update self._cfg after all three constructors succeeded.
+            # If any raised, self._cfg still points to the previous config so the
+            # pipeline remains in a consistent state (controllers match config).
+            self._cfg = new_cfg
+            self._log("config_reloaded", {"msg": "Config reloaded from environment."})
+        except Exception as exc:
+            self._log("config_reload_failed", {"error": str(exc)})
 
     def _verify_goal(self, intent: IntentBlock, req_id: int) -> Optional[str]:
         """
@@ -250,6 +375,8 @@ class PipelineCoordinator:
         can correlate the outbox entry with the trace header.
         """
         ts = int(time.time())
+        t_start = time.monotonic()
+        t_translate = t_plan = t_execute = t_summarize = 0.0
 
         # Guard: LLM is disabled globally
         if not self.allow_llm:
@@ -263,6 +390,7 @@ class PipelineCoordinator:
 
         # Stage 1: Translate — NL prompt → structured IntentBlock
         # Passes rolling history so follow-up queries understand prior context.
+        _t0 = time.monotonic()
         try:
             intent = self.translator.translate(user_text, req_id, history=list(self._history))
         except TranslatorError as e:
@@ -273,9 +401,12 @@ class PipelineCoordinator:
                 step_results=[], human_summary=f"Failed to parse intent: {e}",
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
+        t_translate = (time.monotonic() - _t0) * 1000
 
         # Short-circuit: noop intent needs no plan or execution
         if intent.intent_type == "noop":
+            self.trace.log({"event": "stage_timing", "req_id": req_id,
+                            "translator_ms": round(t_translate, 1)})
             return PipelineResult(
                 request_id=req_id, ts=ts, success=True,
                 stage_failed=None, intent=intent, plan=None,
@@ -284,6 +415,7 @@ class PipelineCoordinator:
             )
 
         # Stage 2: Plan — IntentBlock → ordered ExecutionPlan of MCP tool calls
+        _t0 = time.monotonic()
         try:
             plan = self.planner.plan(intent, req_id)
         except PlannerError as e:
@@ -294,9 +426,13 @@ class PipelineCoordinator:
                 step_results=[], human_summary=f"Failed to create execution plan: {e}",
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
+        t_plan = (time.monotonic() - _t0) * 1000
 
         # Short-circuit: planner returned an empty steps list (unusual but valid)
         if not plan.steps:
+            self.trace.log({"event": "stage_timing", "req_id": req_id,
+                            "translator_ms": round(t_translate, 1),
+                            "planner_ms": round(t_plan, 1)})
             return PipelineResult(
                 request_id=req_id, ts=ts, success=True,
                 stage_failed=None, intent=intent, plan=plan,
@@ -307,6 +443,7 @@ class PipelineCoordinator:
         # Stage 3: Execute — run each plan step against the MCP server sequentially
         # ExecutorError carries partial_results so we can report what succeeded
         # before the failure, even when raising.
+        _t0 = time.monotonic()
         try:
             step_results = self.executor.execute(plan, req_id)
         except ExecutorError as e:
@@ -318,6 +455,7 @@ class PipelineCoordinator:
                 human_summary=f"Execution failed: {e}",
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
+        t_execute = (time.monotonic() - _t0) * 1000
 
         # all_ok: every step either succeeded (ok=True) or was intentionally
         # skipped (on_error=skip). A skipped step doesn't count as failure.
@@ -326,16 +464,92 @@ class PipelineCoordinator:
         # Stage 4: Summarize — LLM produces a human-readable answer from tool results
         # Only runs when all steps passed; otherwise falls back to the intent's
         # pre-computed human_summary string.
+        #
+        # Streaming: tokens are written to runtime/agent/stream.jsonl as they
+        # arrive. The UI server tails this file via /api/tokens SSE and delivers
+        # them to the browser in near-real-time. stream_end is written in a
+        # finally block so the SSE client always sees the end marker.
+        _t0 = time.monotonic()
         if all_ok and step_results:
+            stream_path = _runtime_agent_dir() / "stream.jsonl"
+
+            # Overwrite (not append) to clear any previous query's tokens.
+            # The SSE client seeks to end-of-file on connect, but clearing here
+            # ensures stale tokens from a prior query never bleed into a new one
+            # if the client reconnects mid-stream.
             try:
-                summary = self.summarizer.summarize(intent, step_results, req_id)
+                stream_path.write_text(
+                    json.dumps({"event": "stream_start", "req_id": req_id, "ts": int(time.time())}) + "\n",
+                    encoding="utf-8",
+                )
+            except Exception as _stream_err:
+                # Log instead of silently swallowing — a write failure here
+                # (disk full, permissions) means no tokens will appear in the UI.
+                # The summarizer still runs and its result still reaches the UI
+                # via the outbox; streaming is best-effort, never blocks the result.
+                self.trace.log({
+                    "event": "stream_write_error",
+                    "stage": "summarizer",
+                    "req_id": req_id,
+                    "error": str(_stream_err),
+                })
+
+            def _on_token(text: str) -> None:
+                # Called for each token chunk yielded by the LLM during streaming.
+                # Each chunk is a separate JSONL line so the SSE endpoint can deliver
+                # them individually as they arrive (tail-and-emit pattern).
+                # Flush after every write so the OS buffer doesn't delay delivery.
+                try:
+                    with stream_path.open("a", encoding="utf-8") as _sf:
+                        _sf.write(json.dumps({"event": "token", "text": text}) + "\n")
+                        _sf.flush()
+                except Exception as _token_err:
+                    # Log once per failing token rather than silently discarding.
+                    # Repeated failures (e.g. disk full) will appear in the trace
+                    # so the operator can diagnose without inspecting the stream file.
+                    self.trace.log({
+                        "event": "stream_write_error",
+                        "stage": "summarizer",
+                        "req_id": req_id,
+                        "error": str(_token_err),
+                    })
+
+            try:
+                summary = self.summarizer.summarize(intent, step_results, req_id, on_token=_on_token)
             except Exception as e:
                 # Summarizer failure is non-fatal — always fall back to the Translator's
                 # pre-computed human_summary. Log the exception so it's visible in the trace.
                 self.trace.log({"event": "summarizer_error", "req_id": req_id, "error": str(e)})
                 summary = intent.human_summary
+            finally:
+                # Always write stream_end, even if the summarizer raised or if
+                # earlier writes failed. The SSE client uses stream_end to remove
+                # the blinking cursor; without it the cursor stays on screen forever.
+                try:
+                    with stream_path.open("a", encoding="utf-8") as _sf:
+                        _sf.write(json.dumps({"event": "stream_end", "req_id": req_id, "ts": int(time.time())}) + "\n")
+                        _sf.flush()
+                except Exception as _end_err:
+                    self.trace.log({
+                        "event": "stream_write_error",
+                        "stage": "summarizer",
+                        "req_id": req_id,
+                        "error": str(_end_err),
+                    })
         else:
             summary = intent.human_summary
+        t_summarize = (time.monotonic() - _t0) * 1000
+
+        # Log per-stage timing for metrics aggregation (item 4)
+        self.trace.log({
+            "event": "stage_timing",
+            "req_id": req_id,
+            "translator_ms": round(t_translate, 1),
+            "planner_ms":    round(t_plan, 1),
+            "executor_ms":   round(t_execute, 1),
+            "summarizer_ms": round(t_summarize, 1),
+            "total_ms":      round((time.monotonic() - t_start) * 1000, 1),
+        })
 
         # Post-execution goal verification: read the network state to confirm the
         # intent actually took effect. Appends a short note to the summary if verified.
@@ -384,6 +598,10 @@ class PipelineCoordinator:
 
         while True:
             try:
+                # Check for pending config reload (triggered by SIGHUP)
+                if self._reload_pending:
+                    self._reload_config()
+
                 for msg in read_new():
                     req_id = int(msg.get("id", 0))
                     meta = msg.get("meta") or {}

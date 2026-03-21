@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from openai import OpenAI
 from ai.llm.base import (
@@ -155,3 +155,37 @@ class OpenAIBackend(LLMBackend):
             reasoning=None,
             usage=usage,
         )
+
+    def stream(self, request: LLMRequest) -> Iterable[str]:
+        """
+        Stream text tokens from OpenAI using the streaming completions API.
+
+        Yields content delta strings as they arrive from the API. Usage stats
+        are not available mid-stream; callers that need token counts should
+        call step() instead.
+        """
+        try:
+            kwargs: Dict[str, Any] = {
+                "model": self.model,
+                "messages": request.messages,
+                "temperature": request.temperature,
+                "max_tokens": request.max_output_tokens,
+                "stream": True,
+            }
+            if request.tools:
+                kwargs["tools"] = request.tools
+
+            for chunk in self.client.chat.completions.create(**kwargs):
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield delta.content
+
+        except Exception as e:
+            msg = str(e)
+            if "401" in msg or "authentication" in msg.lower() or "api_key" in msg.lower():
+                raise AuthError(msg) from e
+            if "429" in msg or "rate_limit" in msg.lower():
+                raise RateLimitError(msg) from e
+            if any(c in msg for c in ("500", "502", "503", "504", "timeout", "connect")):
+                raise TransientAPIError(msg) from e
+            raise PermanentAPIError(msg) from e

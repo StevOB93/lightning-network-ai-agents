@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 #   - More than MAX_CONSEC_READ_ONLY consecutive calls triggers a "stuck" stop.
 READ_ONLY_TOOLS = {
     "network_health",
+    "sys_netinfo",          # Read-only: queries the OS routing table, no side effects
     "btc_getblockchaininfo",
     "btc_getnewaddress",    # Returns an address but doesn't spend or mutate channels
     "ln_listnodes",
@@ -80,8 +81,9 @@ FALLBACK_ALLOWED_TOOLS = READ_ONLY_TOOLS | STATE_CHANGING_TOOLS
 #   1. Detect if required keys are missing so we can try unwrapping {"args": {...}}
 #   2. Final validation: return an error if keys are still missing after unwrapping
 TOOL_REQUIRED: Dict[str, List[str]] = {
-    # Health
+    # Health / system info
     "network_health": [],
+    "sys_netinfo":    [],
 
     # Bitcoin
     "btc_getblockchaininfo": [],
@@ -208,6 +210,30 @@ def _normalize_tool_args(tool: str, args: Any) -> Tuple[Dict[str, Any], Optional
         if key in a and isinstance(a[key], int):
             if a[key] < 1 or a[key] > node_count:
                 return a, f"node {a[key]} out of range (valid: 1-{node_count})", changed
+
+    # Step 4b: Validate amount ranges (must be positive integers/floats)
+    if "amount_msat" in a and isinstance(a["amount_msat"], int) and a["amount_msat"] <= 0:
+        return a, "amount_msat must be a positive integer (millisatoshis)", changed
+    if "amount_sat" in a and isinstance(a["amount_sat"], int) and a["amount_sat"] <= 0:
+        return a, "amount_sat must be a positive integer (satoshis)", changed
+    if "amount_btc" in a:
+        try:
+            btc_val = float(a["amount_btc"])
+        except (TypeError, ValueError):
+            btc_val = -1
+        if btc_val <= 0:
+            return a, "amount_btc must be a positive number", changed
+
+    # Step 4c: Validate port range
+    if "port" in a and isinstance(a["port"], int):
+        if a["port"] < 1 or a["port"] > 65535:
+            return a, f"port {a['port']} out of range (valid: 1-65535)", changed
+
+    # Step 4d: Validate bolt11 basic format (Lightning invoice prefix)
+    if "bolt11" in a and isinstance(a["bolt11"], str):
+        b11 = a["bolt11"].lower()
+        if not (b11.startswith("lnbc") or b11.startswith("lnbcrt") or b11.startswith("lntb") or b11.startswith("ln")):
+            return a, f"bolt11 does not look like a Lightning invoice: {a['bolt11'][:30]}...", changed
 
     # Step 5: Validate bitcoin addresses for regtest network
     # Valid regtest prefixes: bcrt1 (segwit), 2 (P2SH), m/n (legacy)
@@ -444,8 +470,9 @@ def llm_tools_schema() -> List[Dict[str, Any]]:
     Format: [{"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}]
     """
     return [
-        # Health
+        # Health / system info
         {"type": "function", "function": {"name": "network_health", "description": "Check Bitcoin+Lightning health.", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "sys_netinfo", "description": "Get this machine's hostname and non-loopback IPs. Use before ln_node_start(bind_host, announce_host) to find the correct IP for cross-machine Lightning peer connectivity.", "parameters": {"type": "object", "properties": {}}}},
 
         # Bitcoin
         {"type": "function", "function": {"name": "btc_getblockchaininfo", "description": "Get blockchain status.", "parameters": {"type": "object", "properties": {}}}},
@@ -457,7 +484,7 @@ def llm_tools_schema() -> List[Dict[str, Any]]:
         # Node lifecycle
         {"type": "function", "function": {"name": "ln_listnodes", "description": "List node dirs.", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "ln_node_status", "description": "Is node running.", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}}, "required": ["node"]}}},
-        {"type": "function", "function": {"name": "ln_node_start", "description": "Start node.", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}}, "required": ["node"]}}},
+        {"type": "function", "function": {"name": "ln_node_start", "description": "Start node. Optional: bind_host (IP to bind on, e.g. '0.0.0.0' for all interfaces) and announce_host (IP to advertise to peers) for cross-machine connectivity. Call sys_netinfo first to get the correct announce_host.", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}, "bind_host": {"type": "string", "description": "IP to bind on. Omit for default (127.0.0.1)."}, "announce_host": {"type": "string", "description": "IP/hostname to advertise to peers. Omit for default."}}, "required": ["node"]}}},
         {"type": "function", "function": {"name": "ln_node_create", "description": "Create node dir.", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}}, "required": ["node"]}}},
         {"type": "function", "function": {"name": "ln_node_stop", "description": "Stop node.", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}}, "required": ["node"]}}},
         {"type": "function", "function": {"name": "ln_node_delete", "description": "Delete node dir.", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}}, "required": ["node"]}}},

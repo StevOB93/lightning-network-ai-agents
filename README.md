@@ -52,7 +52,7 @@ Cleanly shuts down Bitcoin, Lightning, and the AI pipeline.
 
 The dashboard at `http://127.0.0.1:8008` is the main interface.
 
-Type any Lightning Network instruction into the prompt box and press **Queue Request** (or Ctrl+Enter):
+Type any Lightning Network instruction into the prompt box and press **Enter** to submit (Shift+Enter for a newline):
 
 ```
 Check the network health and tell me the status of all nodes.
@@ -77,14 +77,15 @@ The dashboard shows live:
 ## Architecture
 
 ```
-Prompt → [Translator] → Intent → [Planner] → Plan → [Executor] → Results
+Prompt → [Translator] → Intent → [Planner] → Plan → [Executor] → Results → [Summarizer] → Answer
 ```
 
 | Stage | Does | Uses LLM? |
 |-------|------|-----------|
-| Translator | Text → structured IntentBlock | Yes |
-| Planner | IntentBlock → ordered tool steps | Yes |
-| Executor | Runs MCP tool calls, retries, chaining | No |
+| Translator | Text → structured IntentBlock (goal, intent, success criteria) | Yes |
+| Planner | IntentBlock → ordered tool steps with rationale | Yes |
+| Executor | Runs MCP tool calls, retries, value chaining | No |
+| Summarizer | Tool results → human-readable answer + success/failure verdict | Yes |
 
 **Multi-turn**: the last 4 exchanges are carried as context — follow-up prompts like "now pay that invoice" work naturally.
 
@@ -150,13 +151,13 @@ Override ports in `.env`: `BITCOIN_RPC_PORT`, `LIGHTNING_BASE_PORT`, `UI_PORT`.
 
 ```
 lightning-network-ai-agents/
-├── run.sh              ← START HERE
+├── start.sh            ← START HERE
 ├── stop.sh             ← stop everything
-├── setup.sh            ← one-time install
+├── install.sh          ← one-time install
 └── ln-ai-network/
-    ├── ai/             # Pipeline: translator, planner, executor, models, LLM backends
+    ├── ai/             # Pipeline: translator, planner, executor, summarizer, models
     ├── mcp/            # MCP tool server (bitcoin-cli / lightning-cli boundary)
-    ├── scripts/        # Start, stop, install, startup sequence
+    ├── scripts/        # Boot scripts, agent restart, UI server
     │   └── ui_server.py
     ├── web/            # Frontend (HTML, JS, CSS)
     ├── .env.example    # Copy to .env and fill in secrets

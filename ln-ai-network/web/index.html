@@ -69,6 +69,11 @@
           <code class="ind-value" id="msg-count">—</code>
         </div>
       </div>
+      <!-- System controls — top-right corner of status bar -->
+      <div class="status-bar-actions">
+        <button id="restart-btn" class="btn-warning-sm" title="Restart all nodes and the AI agent">↺ Restart</button>
+        <button id="shutdown-btn" class="btn-danger-sm" title="Shut down all nodes and the AI agent">⏻ Shutdown</button>
+      </div>
     </header>
 
     <!-- ── Tab bar ── click sets data-tab active, app.js shows matching panel ── -->
@@ -77,6 +82,7 @@
       <button class="tab-btn" data-tab="pipeline">Pipeline</button>
       <button class="tab-btn" data-tab="network">Network</button>
       <button class="tab-btn" data-tab="logs">Logs</button>
+      <button class="tab-btn" data-tab="settings">Settings</button>
     </nav>
 
     <!-- ── Tab: Agent ── prompt input + most-recent result summary ── -->
@@ -227,6 +233,8 @@
           <div class="card-header">
             <h2>Live Trace Log</h2>
             <div class="card-header-actions">
+              <!-- Copy button moved here, left of Archive, so it's always visible -->
+              <button class="copy-btn copy-btn-inline" data-target="trace-log" title="Copy trace log">⎘</button>
               <!-- Toggles #archive-panel; fetches /api/logs on first open -->
               <button id="archive-toggle-btn" class="btn-ghost small">Archive ▾</button>
               <!-- Clears the DOM trace rows (does not delete trace.log on disk) -->
@@ -235,8 +243,6 @@
               <span class="auto-badge">auto</span>
             </div>
           </div>
-          <!-- Copy button copies all visible trace rows as text -->
-          <button class="copy-btn" data-target="trace-log" title="Copy">⎘</button>
           <!-- Trace rows appended by renderTrace() as SSE trace events arrive -->
           <div id="trace-log" class="trace-log">
             <div class="empty-state">No trace events yet.</div>
@@ -275,6 +281,7 @@
               <h2>Inbox</h2>
               <!-- Updated by renderQueues() on each status event -->
               <span class="queue-count" id="inbox-count">0</span>
+              <button id="inbox-clear-btn" class="btn-ghost-sm" title="Clear display">✕ Clear</button>
             </div>
             <div id="inbox-list" class="item-list"></div>
           </section>
@@ -283,14 +290,130 @@
             <div class="card-header">
               <h2>Outbox</h2>
               <span class="queue-count" id="outbox-count">0</span>
+              <button id="outbox-clear-btn" class="btn-ghost-sm" title="Clear display">✕ Clear</button>
             </div>
             <div id="outbox-list" class="item-list"></div>
           </section>
         </div>
 
-      </div>
+      </div><!-- /bottom-grid -->
+
+      <!-- Crash kit card — one-click debug snapshot for bug reports -->
+      <section class="card crash-kit-card">
+        <div class="card-header">
+          <h2>Crash Kit</h2>
+          <div class="card-header-actions">
+            <span class="crash-kit-hint">Captures full system state for bug reports</span>
+            <button id="crash-kit-btn" class="btn-secondary">⎘ Copy Crash Kit</button>
+          </div>
+        </div>
+        <!-- Preview of the generated crash kit text; populated on button click -->
+        <pre class="crash-kit-preview" id="crash-kit-preview">Click "Copy Crash Kit" to generate a debug snapshot and copy it to the clipboard.</pre>
+      </section>
 
     </div><!-- /tab-logs -->
+
+    <!-- ── Tab: Settings ── config form ── -->
+    <div class="tab-panel" id="tab-settings" hidden>
+
+      <section class="card settings-card">
+        <div class="card-header">
+          <h2>Configuration</h2>
+          <span class="settings-note">Changes are saved to <code>.env</code> and take effect on next restart.</span>
+        </div>
+
+        <div class="settings-groups">
+
+          <!-- LLM Provider -->
+          <div class="settings-group">
+            <div class="settings-group-title">LLM Provider</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-llm-backend">Backend</label>
+                <select id="cfg-llm-backend" class="settings-select" data-key="LLM_BACKEND">
+                  <option value="openai">OpenAI</option>
+                  <option value="ollama">Ollama (local)</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="anthropic">Anthropic</option>
+                </select>
+              </div>
+              <div class="settings-field">
+                <label for="cfg-openai-model">OpenAI Model</label>
+                <input id="cfg-openai-model" class="settings-input" type="text" data-key="OPENAI_MODEL" placeholder="gpt-4o">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ollama-model">Ollama Model</label>
+                <input id="cfg-ollama-model" class="settings-input" type="text" data-key="OLLAMA_MODEL" placeholder="llama3.2">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ollama-url">Ollama Base URL</label>
+                <input id="cfg-ollama-url" class="settings-input" type="text" data-key="OLLAMA_BASE_URL" placeholder="http://localhost:11434">
+              </div>
+            </div>
+          </div>
+
+          <!-- Timeouts -->
+          <div class="settings-group">
+            <div class="settings-group-title">Timeouts</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-mcp-timeout">MCP Call Timeout (s)</label>
+                <input id="cfg-mcp-timeout" class="settings-input" type="number" data-key="MCP_CALL_TIMEOUT_S" min="5" max="300">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-node-start-timeout">Node Start Timeout (s)</label>
+                <input id="cfg-node-start-timeout" class="settings-input" type="number" data-key="MCP_NODE_START_TIMEOUT_S" min="5" max="300">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-node-stop-timeout">Node Stop Timeout (s)</label>
+                <input id="cfg-node-stop-timeout" class="settings-input" type="number" data-key="MCP_NODE_STOP_TIMEOUT_S" min="5" max="300">
+              </div>
+            </div>
+          </div>
+
+          <!-- Network -->
+          <div class="settings-group">
+            <div class="settings-group-title">Network</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-ln-bind-host">Lightning Bind Host</label>
+                <input id="cfg-ln-bind-host" class="settings-input" type="text" data-key="LN_BIND_HOST" placeholder="127.0.0.1">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ln-announce-host">Lightning Announce Host</label>
+                <input id="cfg-ln-announce-host" class="settings-input" type="text" data-key="LN_ANNOUNCE_HOST" placeholder="(defaults to bind host)">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-regtest-height">Regtest Target Block Height</label>
+                <input id="cfg-regtest-height" class="settings-input" type="number" data-key="REGTEST_TARGET_HEIGHT" min="1" max="100000">
+              </div>
+            </div>
+          </div>
+
+          <!-- UI Server -->
+          <div class="settings-group">
+            <div class="settings-group-title">UI Server</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-ui-host">Host</label>
+                <input id="cfg-ui-host" class="settings-input" type="text" data-key="UI_HOST" placeholder="127.0.0.1">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ui-port">Port</label>
+                <input id="cfg-ui-port" class="settings-input" type="number" data-key="UI_PORT" min="1024" max="65535">
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /settings-groups -->
+
+        <div class="settings-actions">
+          <button id="settings-save-btn" class="btn-primary">Save to .env</button>
+          <span class="settings-status" id="settings-status"></span>
+        </div>
+      </section>
+
+    </div><!-- /tab-settings -->
 
   </div>
 

@@ -62,6 +62,27 @@ export LN_AI_INTERNAL_CALL=1
 "$PROJECT_ROOT/scripts/shutdown/2.control_plane_shutdown.sh"
 "$PROJECT_ROOT/scripts/shutdown/3.infra_shutdown.sh" "$NODE_COUNT"
 
+###############################################################################
+# STOP UI SERVER
+# Must run last — the user can still see the UI while the earlier steps run.
+# The PID file is written by scripts/startup/0.4.ui_server.sh.
+###############################################################################
+: "${RUNTIME_DIR:?env.sh must set RUNTIME_DIR}"
+UI_PID_FILE="$RUNTIME_DIR/ui_server.pid"
+
+if [[ -f "$UI_PID_FILE" ]]; then
+  UI_PID="$(cat "$UI_PID_FILE" || true)"
+  if [[ -n "$UI_PID" ]] && kill -0 "$UI_PID" >/dev/null 2>&1; then
+    echo "[INFO] Stopping UI server (PID $UI_PID)..."
+    kill "$UI_PID" || true
+  else
+    echo "[INFO] UI server PID $UI_PID not running."
+  fi
+  rm -f "$UI_PID_FILE"
+else
+  echo "[INFO] No UI server pid file found — already stopped or never started."
+fi
+
 echo "=================================================="
 echo "SYSTEM STOPPED"
 echo "=================================================="

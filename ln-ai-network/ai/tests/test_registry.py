@@ -152,3 +152,37 @@ def test_purge_stale_removes_dead_entries(reg, tmp_path):
 
 def test_purge_stale_no_file_returns_zero(reg):
     assert reg.purge_stale() == 0
+
+
+# =============================================================================
+# await_reply
+# =============================================================================
+
+def test_await_reply_returns_matching_message(reg, tmp_path):
+    """await_reply returns the first message with in_reply_to == reply_id."""
+    inbox = tmp_path / "inbox.jsonl"
+    reply_id = "test-reply-123"
+    # Write a matching reply into the inbox before calling await_reply
+    reply = {"in_reply_to": reply_id, "content": "done"}
+    inbox.write_text(json.dumps(reply) + "\n")
+    result = reg.await_reply(reply_id, inbox, timeout_s=0.5)
+    assert result is not None
+    assert result["content"] == "done"
+
+
+def test_await_reply_returns_none_on_timeout(reg, tmp_path):
+    """await_reply returns None when no matching message arrives before timeout."""
+    inbox = tmp_path / "inbox.jsonl"
+    result = reg.await_reply("no-such-id", inbox, timeout_s=0.2, poll_interval_s=0.05)
+    assert result is None
+
+
+def test_await_reply_skips_non_matching_messages(reg, tmp_path):
+    """await_reply ignores messages with different in_reply_to values."""
+    inbox = tmp_path / "inbox.jsonl"
+    other = {"in_reply_to": "different-id", "content": "wrong"}
+    target = {"in_reply_to": "correct-id", "content": "right"}
+    inbox.write_text(json.dumps(other) + "\n" + json.dumps(target) + "\n")
+    result = reg.await_reply("correct-id", inbox, timeout_s=0.5)
+    assert result is not None
+    assert result["content"] == "right"

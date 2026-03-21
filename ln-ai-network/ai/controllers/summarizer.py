@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ai.controllers.shared import _env_float, _env_int
 from ai.llm.base import LLMBackend, LLMError, LLMRequest
@@ -101,6 +101,7 @@ class Summarizer:
         intent: IntentBlock,
         step_results: List[StepResult],
         req_id: int,
+        on_token: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
         Produce a human-readable summary from intent + tool results.
@@ -147,7 +148,16 @@ class Summarizer:
                 max_output_tokens=self.config.max_output_tokens,
                 temperature=self.config.temperature,
             )
-            resp = self.backend.step(req)
+            if on_token is not None:
+                # Streaming mode: yield tokens to caller as they arrive
+                chunks: List[str] = []
+                for text in self.backend.stream(req):
+                    on_token(text)
+                    chunks.append(text)
+                content = "".join(chunks).strip()
+            else:
+                resp = self.backend.step(req)
+                content = (resp.content or "").strip()
         except LLMError as e:
             # Log the error and fall back to the static human_summary from the intent
             self.trace.log({
@@ -157,8 +167,6 @@ class Summarizer:
                 "error": str(e),
             })
             return intent.human_summary
-
-        content = (resp.content or "").strip()
         self.trace.log({
             "event": "llm_response",
             "stage": "summarizer",

@@ -50,9 +50,16 @@ const outboxList       = $("outbox-list");
 const inboxCount   = $("inbox-count");
 const outboxCount  = $("outbox-count");
 
+// Hide items older than these timestamps (Unix seconds). Set by clear buttons.
+let _inboxClearTs  = 0;
+let _outboxClearTs = 0;
+
 // Network tab elements
 const networkViz   = $("network-viz");   // D3 SVG container
 const networkHint  = $("network-hint");  // "N nodes, M channels" hint text
+
+// Settings tab elements
+const settingsStatus = $("settings-status"); // Inline feedback next to save button
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -486,6 +493,8 @@ async function fetchAndRenderMetrics() {
     const successPct = (m.success_rate * 100).toFixed(1);
     const avgDur = m.avg_duration_s != null ? m.avg_duration_s.toFixed(2) + "s" : "—";
     const sc = m.status_counts || {};
+    const st = m.avg_stage_ms || {};
+    const fmtMs = v => v != null ? Math.round(v) + "ms" : "—";
     metricsContent.innerHTML = `
       <div class="metric-tile">
         <div class="metric-value">${m.total_queries}</div>
@@ -510,6 +519,22 @@ async function fetchAndRenderMetrics() {
       <div class="metric-tile">
         <div class="metric-value">${avgDur}</div>
         <div class="metric-label">Avg Duration</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value">${fmtMs(st.translator)}</div>
+        <div class="metric-label">Avg Translate</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value">${fmtMs(st.planner)}</div>
+        <div class="metric-label">Avg Plan</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value">${fmtMs(st.executor)}</div>
+        <div class="metric-label">Avg Execute</div>
+      </div>
+      <div class="metric-tile">
+        <div class="metric-value">${fmtMs(st.summarizer)}</div>
+        <div class="metric-label">Avg Summarize</div>
       </div>
     `;
   } catch (_) {
@@ -573,13 +598,14 @@ function renderArchiveTrace(container, events) {
  * The copy button uses data-copy to store the full text inline so the global
  * copy handler can access it without another fetch.
  */
-function renderQueue(container, countEl, items, labelPrefix) {
-  countEl.textContent = items?.length ?? 0;
-  if (!items?.length) {
+function renderQueue(container, countEl, items, labelPrefix, hideBeforeTs = 0) {
+  const visible = (items ?? []).filter(item => !hideBeforeTs || (item.ts ?? 0) >= hideBeforeTs);
+  countEl.textContent = visible.length;
+  if (!visible.length) {
     container.innerHTML = '<div class="empty-state">No entries yet.</div>';
     return;
   }
-  container.innerHTML = items.slice().reverse().map(item => {
+  container.innerHTML = visible.slice().reverse().map(item => {
     const id = item.request_id ?? item.id ?? "?";
     // Prefer content field; fall back to meta or summary JSON for non-pipeline entries
     const body = item.content ?? JSON.stringify(item.meta ?? item.summary ?? {});
@@ -594,6 +620,9 @@ function renderQueue(container, countEl, items, labelPrefix) {
       </div>`;
   }).join("");
 }
+
+function clearInbox()  { _inboxClearTs  = Date.now() / 1000; renderQueue(inboxList,  inboxCount,  [], "Req",  _inboxClearTs); }
+function clearOutbox() { _outboxClearTs = Date.now() / 1000; renderQueue(outboxList, outboxCount, [], "Rep", _outboxClearTs); }
 
 // ---------------------------------------------------------------------------
 // Network visualization (D3 force graph)
@@ -776,8 +805,8 @@ async function fetchStatus() {
   const res = await fetch("/api/status");
   const data = await res.json();
   updateStatusBar(data);
-  renderQueue(inboxList, inboxCount, data.recent_inbox, "Req");
-  renderQueue(outboxList, outboxCount, data.recent_outbox, "Rep");
+  renderQueue(inboxList, inboxCount, data.recent_inbox, "Req", _inboxClearTs);
+  renderQueue(outboxList, outboxCount, data.recent_outbox, "Rep", _outboxClearTs);
 }
 
 /** Fetch the latest pipeline result and render all stage panels. */
@@ -828,16 +857,212 @@ async function queueHealth() {
 }
 
 // ---------------------------------------------------------------------------
+// Crash kit
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a crash kit JSON payload into a readable plain-text debug report.
+ *
+ * Sections:
+ *   SYSTEM    — platform, Python version, node count
+ *   CONFIG    — non-sensitive env var values
+ *   RUNTIME   — agent lock status, queue message count
+ *   LAST PIPELINE RESULT — request ID, stage failed, error, summary
+ *   METRICS   — aggregate query stats
+ *   TRACE     — last 100 events in ISO timestamp + kind + detail format
+ */
+function formatCrashKit(data) {
+  const ts = new Date((data.generated_at || Date.now() / 1000) * 1000).toISOString();
+  const lines = [`=== LIGHTNING AI CRASH KIT ===`, `Generated: ${ts}`, ``];
+
+  // System
+  const sys = data.system || {};
+  lines.push(`--- SYSTEM ---`);
+  lines.push(`Platform:   ${sys.platform || "unknown"}`);
+  lines.push(`Python:     ${sys.python || "unknown"}`);
+  lines.push(`Node count: ${sys.node_count ?? "unknown"}`);
+  lines.push(``);
+
+  // Config (non-sensitive)
+  const cfg = data.config || {};
+  lines.push(`--- CONFIG ---`);
+  for (const [k, v] of Object.entries(cfg)) {
+    lines.push(`  ${k}=${v || "(unset)"}`);
+  }
+  lines.push(``);
+
+  // Runtime
+  const rt = data.runtime || {};
+  lines.push(`--- RUNTIME ---`);
+  lines.push(`Agent lock:    ${rt.agent_lock || "none (not running)"}`);
+  lines.push(`Message count: ${rt.message_count ?? 0}`);
+  lines.push(``);
+
+  // Last pipeline result
+  const pr = data.pipeline_result;
+  lines.push(`--- LAST PIPELINE RESULT ---`);
+  if (pr) {
+    lines.push(`Request ID:  #${pr.request_id ?? "—"}`);
+    lines.push(`Stage failed: ${pr.stage_failed || "none (success)"}`);
+    if (pr.error)   lines.push(`Error:        ${pr.error}`);
+    const summary = pr.content || pr.human_summary;
+    if (summary)    lines.push(`Summary:      ${summary.slice(0, 300)}${summary.length > 300 ? "…" : ""}`);
+  } else {
+    lines.push(`(no pipeline results yet)`);
+  }
+  lines.push(``);
+
+  // Metrics
+  const m = data.metrics || {};
+  if (m.total_queries > 0) {
+    lines.push(`--- METRICS ---`);
+    const sc = m.status_counts || {};
+    lines.push(`Total:    ${m.total_queries} | ok: ${sc.ok ?? 0} | partial: ${sc.partial ?? 0} | failed: ${sc.failed ?? 0}`);
+    lines.push(`Success:  ${((m.success_rate || 0) * 100).toFixed(1)}%`);
+    if (m.avg_duration_s != null) lines.push(`Avg dur:  ${m.avg_duration_s.toFixed(2)}s`);
+    lines.push(``);
+  }
+
+  // Trace
+  const trace = data.trace || [];
+  lines.push(`--- RECENT TRACE (${trace.length} events) ---`);
+  for (const ev of trace) {
+    const evTs = ev.ts ? new Date(ev.ts * 1000).toISOString() : "?";
+    const kind = ev.kind || ev.event || ev.stage || "event";
+    const copy = { ...ev };
+    delete copy.ts; delete copy.kind; delete copy.event; delete copy.stage;
+    const detail = JSON.stringify(copy);
+    lines.push(`${evTs}  ${kind}${detail !== "{}" ? "  " + detail : ""}`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Fetch /api/crash_kit, format the result, show a preview, and copy to clipboard.
+ */
+async function copyCrashKit() {
+  const btn   = $("crash-kit-btn");
+  const preview = $("crash-kit-preview");
+  btn.textContent = "Generating…";
+  btn.disabled = true;
+  try {
+    const res  = await fetch("/api/crash_kit");
+    const data = await res.json();
+    const text = formatCrashKit(data);
+    preview.textContent = text;
+    await navigator.clipboard.writeText(text);
+    btn.textContent = "✓ Copied!";
+    setTimeout(() => { btn.textContent = "⎘ Copy Crash Kit"; btn.disabled = false; }, 2000);
+  } catch (e) {
+    preview.textContent = "Error generating crash kit: " + e.message;
+    btn.textContent = "⎘ Copy Crash Kit";
+    btn.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/**
+ * Load current config values from /api/config and populate the settings form.
+ * Called when the Settings tab is opened.
+ */
+async function loadSettings() {
+  try {
+    const res = await fetch("/api/config");
+    const data = await res.json();
+    document.querySelectorAll("[data-key]").forEach(el => {
+      const val = data[el.dataset.key];
+      if (val !== undefined && val !== null) {
+        el.value = val;
+      }
+    });
+  } catch (_) {
+    // Non-fatal: form fields keep their defaults if load fails
+  }
+}
+
+/**
+ * Collect all settings form fields and POST to /api/config.
+ * Only fields with non-empty values are included in the payload.
+ */
+async function saveSettings() {
+  const updates = {};
+  document.querySelectorAll("[data-key]").forEach(el => {
+    const val = el.value.trim();
+    // Send the field even if empty — allows clearing a previously set value
+    updates[el.dataset.key] = val;
+  });
+  const data = await postJson("/api/config", updates);
+  settingsStatus.textContent = `Saved: ${(data.saved || []).join(", ") || "nothing changed"}`;
+  settingsStatus.className = "settings-status ok";
+  setTimeout(() => { settingsStatus.textContent = ""; settingsStatus.className = "settings-status"; }, 3000);
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask for confirmation then POST /api/shutdown.
+ * Uses a native confirm() dialog so there is no accidental trigger.
+ */
+async function shutdownSystem() {
+  if (!confirm("Shut down the Lightning AI system?\n\nThis will stop all Lightning nodes, the AI agent, and this UI.")) {
+    return;
+  }
+  setLog("Shutting down…");
+  try {
+    await postJson("/api/shutdown", {});
+    setLog("Shutdown initiated. The system is stopping…");
+  } catch (e) {
+    setLog("Shutdown request failed: " + e.message, true);
+  }
+}
+
+/**
+ * Ask for confirmation then POST /api/restart.
+ * Runs shutdown.sh → 1.start.sh in a detached background process.
+ * The UI will briefly disconnect while the system restarts.
+ */
+async function restartSystem() {
+  if (!confirm("Restart the Lightning AI system?\n\nThis will stop and restart all Lightning nodes, the AI agent, and this UI. The page will briefly disconnect.")) {
+    return;
+  }
+  setLog("Restarting…");
+  try {
+    await postJson("/api/restart", {});
+    setLog("Restart initiated. The system is cycling — reconnecting shortly…");
+  } catch (e) {
+    setLog("Restart request failed: " + e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event listeners
 // ---------------------------------------------------------------------------
 $("ask-btn").addEventListener("click",     () => queueAsk().catch(e => setLog(e.message, true)));
 $("health-btn").addEventListener("click",  () => queueHealth().catch(e => setLog(e.message, true)));
 $("refresh-btn").addEventListener("click", () => refreshAll().catch(e => setLog(e.message, true)));
 $("network-refresh-btn").addEventListener("click", () => fetchNetwork().catch(() => {}));
+$("restart-btn").addEventListener("click",  () => restartSystem().catch(e => setLog(e.message, true)));
+$("shutdown-btn").addEventListener("click", () => shutdownSystem().catch(e => setLog(e.message, true)));
+$("crash-kit-btn").addEventListener("click", () => copyCrashKit().catch(() => {}));
+$("inbox-clear-btn").addEventListener("click",  clearInbox);
+$("outbox-clear-btn").addEventListener("click", clearOutbox);
+$("settings-save-btn").addEventListener("click", () =>
+  saveSettings().catch(e => {
+    settingsStatus.textContent = "Save failed: " + e.message;
+    settingsStatus.className = "settings-status error";
+  })
+);
 
-// Ctrl+Enter / Cmd+Enter submits the prompt (keyboard shortcut for power users)
+// Enter submits; Shift+Enter inserts a newline (default textarea behavior)
 promptInput.addEventListener("keydown", e => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
     queueAsk().catch(err => setLog(err.message, true));
   }
 });
@@ -872,8 +1097,8 @@ function startSSE() {
     try {
       const data = JSON.parse(e.data);
       updateStatusBar(data);
-      renderQueue(inboxList, inboxCount, data.recent_inbox, "Req");
-      renderQueue(outboxList, outboxCount, data.recent_outbox, "Rep");
+      renderQueue(inboxList, inboxCount, data.recent_inbox, "Req", _inboxClearTs);
+      renderQueue(outboxList, outboxCount, data.recent_outbox, "Rep", _outboxClearTs);
     } catch (_) {}
   });
 
@@ -911,6 +1136,53 @@ function startSSE() {
 }
 
 // ---------------------------------------------------------------------------
+// Token streaming SSE (summarizer live output)
+// ---------------------------------------------------------------------------
+
+/**
+ * Open an SSE connection to /api/tokens for streaming LLM summary tokens.
+ *
+ * The server tails runtime/agent/stream.jsonl and emits one SSE event per
+ * line. Three event types are handled:
+ *
+ *   stream_start → show summary card with empty body + blinking cursor
+ *   token        → append the token text to summaryBody
+ *   stream_end   → remove blinking cursor (pipeline_result SSE will follow
+ *                  with the authoritative final content shortly after)
+ *
+ * The streaming preview is intentionally overwritten when the pipeline_result
+ * SSE arrives — it is a live preview, not the final result.
+ */
+function startTokenSSE() {
+  if (typeof EventSource === "undefined") return;
+  const es = new EventSource("/api/tokens");
+
+  es.addEventListener("token", e => {
+    try {
+      const obj = JSON.parse(e.data);
+      if (obj.event === "stream_start") {
+        // A new summarizer run is starting — show the card and clear old content
+        summaryCard.style.display = "";
+        summaryIcon.textContent = "…";
+        summaryIcon.className = "summary-icon";
+        summaryTs.textContent = fmtDateTime(obj.ts);
+        summaryBody.textContent = "";
+        summaryBody.classList.add("streaming");
+      } else if (obj.event === "token") {
+        summaryBody.textContent += obj.text;
+      } else if (obj.event === "stream_end") {
+        summaryBody.classList.remove("streaming");
+      }
+    } catch (_) {}
+  });
+
+  es.onerror = () => {
+    es.close();
+    setTimeout(startTokenSSE, 5000);
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Tab switching
 // ---------------------------------------------------------------------------
 
@@ -930,6 +1202,8 @@ function initTabs() {
       const target = btn.dataset.tab;
       buttons.forEach(b => b.classList.toggle("active", b === btn));
       panels.forEach(p => { p.hidden = p.id !== "tab-" + target; });
+      // Populate settings form with live values whenever the tab is opened
+      if (target === "settings") loadSettings().catch(() => {});
     });
   });
 }
@@ -949,6 +1223,9 @@ fetchAndRenderMetrics().catch(() => {});
 
 // Open the SSE stream for live updates.
 startSSE();
+
+// Open the token streaming SSE for live summarizer output.
+startTokenSSE();
 
 // Polling fallback intervals — only fire when SSE is not delivering updates.
 // This handles browsers that don't support EventSource or networks that block SSE.
