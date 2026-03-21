@@ -194,7 +194,7 @@ class Translator:
                 "stage": "translator",
                 "req_id": req_id,
                 "attempt": attempt,
-                "content_preview": content[:300],  # Truncated to keep trace compact
+                "content_preview": content[:600],  # Truncated to keep trace compact
             })
 
             try:
@@ -254,7 +254,13 @@ class Translator:
         try:
             obj = json.loads(cleaned)
         except json.JSONDecodeError as e:
-            raise ValueError(f"Not valid JSON: {e}") from e
+            # Include the 40-char window around the failure so the trace log
+            # shows exactly what character caused the parse error.
+            lo = max(0, e.pos - 20)
+            hi = min(len(cleaned), e.pos + 20)
+            raise ValueError(
+                f"Not valid JSON: {e} | context: {repr(cleaned[lo:hi])}"
+            ) from e
 
         if not isinstance(obj, dict):
             raise ValueError("Expected a JSON object")
