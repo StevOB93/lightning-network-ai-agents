@@ -128,8 +128,45 @@ def _repair_json(text: str) -> str:
     #   null|true|false — JSON literal values (their last char isn't in the class above)
     # Uses \s+ so it catches both } "key": (same line) and }\n "key": (newline) cases.
     text = re.sub(r'(null|true|false|[\}\]"\d])\s+(\s*"[^"]+"\s*:)', r'\1,\n\2', text)
-    # Strip any text after the final closing brace (e.g. trailing explanation)
-    m = re.search(r'\}[^}]*$', text)
-    if m:
-        text = text[:m.end() - len(m.group()) + 1]
+    # Balance braces and strip trailing garbage.
+    #
+    # The LLM sometimes:
+    #   (a) omits the outer closing } — the regex }\[^}]*$ approach would
+    #       then find the INNER context object's } and truncate there, leaving
+    #       the JSON incomplete.
+    #   (b) appends explanation text after the JSON — needs to be stripped.
+    #
+    # Walk the string tracking brace/string depth so we know exactly where
+    # the top-level JSON value ends, and handle both cases correctly.
+    in_str = False
+    escaped = False
+    depth = 0
+    end_pos = -1
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_str:
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in ("{", "["):
+            depth += 1
+        elif ch in ("}", "]"):
+            depth -= 1
+            if depth == 0:
+                end_pos = i
+                break
+
+    if end_pos >= 0:
+        # Found the balanced end of the JSON — strip anything after it.
+        text = text[: end_pos + 1]
+    elif depth > 0:
+        # The outer object/array was never closed — append missing braces.
+        text = text.rstrip() + "\n" + "}" * depth
+
     return text
