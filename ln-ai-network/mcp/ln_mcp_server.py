@@ -388,8 +388,8 @@ def ln_node_start(
     # WSL, and HDD-based environments. Override with env vars if needed:
     #   MCP_NODE_START_TIMEOUT_S  — max seconds to wait (default 30)
     #   MCP_NODE_POLL_INTERVAL_S  — seconds between status checks (default 0.5)
-    start_timeout_s  = float(os.environ.get("MCP_NODE_START_TIMEOUT_S",  "30"))
-    poll_interval_s  = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S",  "0.5"))
+    start_timeout_s  = float(os.environ.get("MCP_NODE_START_TIMEOUT_S")  or "30")
+    poll_interval_s  = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S")  or "0.5")
 
     deadline = time.time() + start_timeout_s
     last_reason = ""
@@ -415,8 +415,8 @@ def ln_node_stop(node: Union[int, str]) -> Dict[str, Any]:
     # often to poll. Uses MCP_NODE_POLL_INTERVAL_S shared with ln_node_start.
     # Override with MCP_NODE_STOP_TIMEOUT_S if your nodes take longer to shut down
     # (e.g. when flushing a large channel DB to disk on slow hardware).
-    stop_timeout_s  = float(os.environ.get("MCP_NODE_STOP_TIMEOUT_S",  "30"))
-    poll_interval_s = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S", "0.5"))
+    stop_timeout_s  = float(os.environ.get("MCP_NODE_STOP_TIMEOUT_S")  or "30")
+    poll_interval_s = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S") or "0.5")
 
     deadline = time.time() + stop_timeout_s
     while time.time() < deadline:
