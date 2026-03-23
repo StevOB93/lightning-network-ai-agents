@@ -64,7 +64,10 @@ def load_config() -> RuntimeConfig:
         bitcoin_rpc_password=_env("BITCOIN_RPC_PASSWORD", "lnrpcpass"),
         lightning_base_port=_env_int("LIGHTNING_BASE_PORT", 9735),
         network=_env("NETWORK", "regtest"),
-        cmd_timeout_s=_env_int("MCP_CMD_TIMEOUT_S", 10),
+        # Default raised from 10s → 30s: channel opens, wallet creation, and
+        # block generation on slow hardware routinely exceed 10 seconds.
+        # Operators can still override with MCP_CMD_TIMEOUT_S=<seconds>.
+        cmd_timeout_s=_env_int("MCP_CMD_TIMEOUT_S", 30),
     )
 
 
@@ -196,6 +199,7 @@ def list_tools() -> Dict[str, Any]:
     tools = [
         "list_tools",
         "network_health",
+        "sys_netinfo",
         "btc_getblockchaininfo",
         "btc_wallet_ensure",
         "btc_getnewaddress",
@@ -300,7 +304,26 @@ def ln_node_status(node: Union[int, str]) -> Dict[str, Any]:
     return {"ok": False, "error": err, "payload": {"node": nd.name}}
 
 
-def ln_node_start(node: Union[int, str]) -> Dict[str, Any]:
+def ln_node_start(
+    node: Union[int, str],
+    bind_host: Optional[str] = None,
+    announce_host: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Start a Lightning node.
+
+    bind_host:     IP to bind the peer-to-peer port on. "127.0.0.1" (default)
+                   accepts same-machine peers only. "0.0.0.0" accepts all interfaces.
+                   Explicit arg takes priority over LN_BIND_HOST env var.
+
+    announce_host: IP/hostname advertised to Lightning gossip so remote peers know
+                   where to reach this node. Defaults to bind_host. Set to the
+                   machine's LAN or public IP for cross-machine connectivity.
+                   Explicit arg takes priority over LN_ANNOUNCE_HOST env var.
+
+    Call sys_netinfo() first to get the machine's default_outbound_ip, then pass
+    that as announce_host (with bind_host="0.0.0.0") to enable cross-machine peers.
+    """
     cfg = load_config()
     nd = _node_dir(cfg, node)
     nd.mkdir(parents=True, exist_ok=True)
@@ -312,11 +335,31 @@ def ln_node_start(node: Union[int, str]) -> Dict[str, Any]:
     port = _node_port(cfg, node)
     log_file = nd / "lightningd.log"
 
+    # Resolve bind/announce addresses. Explicit args take priority over env vars so
+    # the agent can configure individual nodes without a process restart or global
+    # env change. Falls back to LN_BIND_HOST / LN_ANNOUNCE_HOST if not provided.
+    resolved_bind     = bind_host     or _env("LN_BIND_HOST",     "127.0.0.1")
+    resolved_announce = announce_host or _env("LN_ANNOUNCE_HOST", resolved_bind)
+
+    # Address flag logic:
+    #   --addr=HOST:PORT      → binds AND announces (correct when bind == announce)
+    #   --bind-addr=HOST:PORT → binds only, no announce (pair with --addr when differ)
+    # Using both --bind-addr and --addr for the SAME address causes lightningd to
+    # report "Duplicate announce address", so --bind-addr is only added when the
+    # two addresses actually differ.
+    if resolved_bind == resolved_announce:
+        addr_flags = [f"--addr={resolved_announce}:{port}"]
+    else:
+        addr_flags = [
+            f"--bind-addr={resolved_bind}:{port}",
+            f"--addr={resolved_announce}:{port}",
+        ]
+
     argv = [
         "lightningd",
         f"--network={cfg.network}",
         f"--lightning-dir={str(nd)}",
-        f"--addr=127.0.0.1:{port}",
+        *addr_flags,
         "--bitcoin-rpcconnect=127.0.0.1",
         f"--bitcoin-rpcport={cfg.bitcoin_rpc_port}",
         f"--bitcoin-rpcuser={cfg.bitcoin_rpc_user}",
@@ -340,16 +383,24 @@ def ln_node_start(node: Union[int, str]) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": f"Failed to start lightningd: {e.__class__.__name__}: {e}", "argv": argv}
 
-    deadline = time.time() + 15.0
+    # How long to wait for the node to become RPC-ready after launch, and how
+    # often to poll. Defaults are generous (30s / 0.5s) to handle slow hardware,
+    # WSL, and HDD-based environments. Override with env vars if needed:
+    #   MCP_NODE_START_TIMEOUT_S  — max seconds to wait (default 30)
+    #   MCP_NODE_POLL_INTERVAL_S  — seconds between status checks (default 0.5)
+    start_timeout_s  = float(os.environ.get("MCP_NODE_START_TIMEOUT_S")  or "30")
+    poll_interval_s  = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S")  or "0.5")
+
+    deadline = time.time() + start_timeout_s
     last_reason = ""
     while time.time() < deadline:
         st2 = ln_node_status(node)
         if st2.get("ok") and st2.get("payload", {}).get("running") is True:
             return {"ok": True, "payload": {"node": nd.name, "started": True, "running": True, "port": port, "log_file": str(log_file)}}
         last_reason = str(st2.get("payload", {}).get("reason", "")) or str(st2.get("error", ""))
-        time.sleep(0.5)
+        time.sleep(poll_interval_s)
 
-    return {"ok": False, "error": f"lightningd started but RPC not ready within 15s: {last_reason}", "payload": {"node": nd.name, "port": port, "log_file": str(log_file)}}
+    return {"ok": False, "error": f"lightningd started but RPC not ready within {start_timeout_s}s: {last_reason}", "payload": {"node": nd.name, "port": port, "log_file": str(log_file)}}
 
 
 def ln_node_stop(node: Union[int, str]) -> Dict[str, Any]:
@@ -360,14 +411,21 @@ def ln_node_stop(node: Union[int, str]) -> Dict[str, Any]:
 
     res = _run_json(_ln_base(cfg, nd) + ["stop"], cfg.cmd_timeout_s)
 
-    deadline = time.time() + 15.0
+    # How long to wait for the node to acknowledge the stop command, and how
+    # often to poll. Uses MCP_NODE_POLL_INTERVAL_S shared with ln_node_start.
+    # Override with MCP_NODE_STOP_TIMEOUT_S if your nodes take longer to shut down
+    # (e.g. when flushing a large channel DB to disk on slow hardware).
+    stop_timeout_s  = float(os.environ.get("MCP_NODE_STOP_TIMEOUT_S")  or "30")
+    poll_interval_s = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S") or "0.5")
+
+    deadline = time.time() + stop_timeout_s
     while time.time() < deadline:
         st = ln_node_status(node)
         if st.get("ok") and st.get("payload", {}).get("running") is False:
             return {"ok": True, "payload": {"node": nd.name, "stopped": True, "stop_result": res}}
-        time.sleep(0.5)
+        time.sleep(poll_interval_s)
 
-    return {"ok": False, "error": "Node did not stop within 15s", "payload": {"node": nd.name, "stop_result": res}}
+    return {"ok": False, "error": f"Node did not stop within {stop_timeout_s}s", "payload": {"node": nd.name, "stop_result": res}}
 
 
 def ln_node_delete(node: Union[int, str], force: bool = False) -> Dict[str, Any]:
@@ -509,6 +567,66 @@ def network_health() -> Dict[str, Any]:
     }
 
 
+def sys_netinfo() -> Dict[str, Any]:
+    """
+    Return this machine's network addresses so the AI agent can determine which
+    IP to announce when enabling cross-machine Lightning peer connectivity.
+
+    Uses the UDP routing trick (connecting to an external IP with no data sent)
+    to ask the OS which outbound interface it would use — the most reliable way
+    to find the default outbound IP without parsing interface tables or requiring
+    root. Returns all non-loopback IPv4 addresses for cases where the machine has
+    multiple interfaces (e.g. LAN + VPN).
+
+    Also returns the current LN_BIND_HOST / LN_ANNOUNCE_HOST env var values so
+    the agent can see whether nodes are already configured for cross-machine use
+    without needing to inspect lightningd process arguments.
+    """
+    import ipaddress
+    import socket
+
+    # UDP connect trick: connect a SOCK_DGRAM socket to an external address. The OS
+    # selects the outbound interface and populates getsockname() with the source IP.
+    # No data is ever sent — SOCK_DGRAM + connect() without sendto() is a pure OS
+    # routing table query. Works behind NAT (returns the LAN IP, which is what we
+    # want for local cross-machine scenarios).
+    default_ip: Optional[str] = None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+            _s.connect(("8.8.8.8", 80))
+            default_ip = _s.getsockname()[0]
+    except Exception:
+        pass  # No default route (air-gapped / isolated container) — all_ips still returned
+
+    # Supplement with all non-loopback IPv4 addresses resolved from the hostname.
+    # Covers machines with multiple interfaces where only one has a default route.
+    all_ips: List[str] = []
+    try:
+        hostname = socket.gethostname()
+        for _, _, _, _, sockaddr in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = sockaddr[0]
+            if not ipaddress.ip_address(ip).is_loopback:
+                all_ips.append(ip)
+    except Exception:
+        pass
+    if default_ip and default_ip not in all_ips:
+        all_ips.insert(0, default_ip)
+
+    return {
+        "ok": True,
+        "payload": {
+            "hostname": socket.gethostname(),
+            # default_outbound_ip: the IP the OS would use to reach another machine.
+            # Use this as announce_host in ln_node_start for typical LAN setups.
+            "default_outbound_ip": default_ip,
+            "all_ips": sorted(set(all_ips)),
+            # Current env var values — if already set, nodes may already be bound correctly.
+            "ln_bind_host":     os.environ.get("LN_BIND_HOST",     "127.0.0.1"),
+            "ln_announce_host": os.environ.get("LN_ANNOUNCE_HOST", ""),
+        },
+    }
+
+
 def _error(msg: str) -> Dict[str, Any]:
     return {"error": msg}
 
@@ -521,6 +639,8 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
             return list_tools()
         if method == "network_health":
             return network_health()
+        if method == "sys_netinfo":
+            return sys_netinfo()
 
         # Bitcoin
         if method == "btc_getblockchaininfo":
@@ -546,7 +666,11 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
         if method == "ln_node_status":
             return ln_node_status(params["node"])
         if method == "ln_node_start":
-            return ln_node_start(params["node"])
+            return ln_node_start(
+                params["node"],
+                bind_host=params.get("bind_host") or None,
+                announce_host=params.get("announce_host") or None,
+            )
         if method == "ln_node_stop":
             return ln_node_stop(params["node"])
         if method == "ln_node_delete":

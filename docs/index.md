@@ -7,7 +7,7 @@ title: Lightning Network AI Agents
 A runnable research harness for **AI agents that can communicate (A2A), use tools (MCP), and transact value (Lightning/x402)** on a Bitcoin-based stack.
 
 ## What this project demonstrates
-- **Bitcoin base layer** (BitCone Core)
+- **Bitcoin base layer** (Bitcoin Core)
 - **Lightning payments** (Lightning node(s) + channels)
 - **Payment-gated APIs** (x402 patterns)
 - **Agent-to-Agent coordination** (A2A)

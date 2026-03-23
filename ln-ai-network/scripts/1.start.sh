@@ -16,6 +16,7 @@ set -euo pipefail
 #   logs/system/0.1.infra_boot.log
 #   logs/system/0.2.control_plane_boot.log
 #   logs/system/0.3.agent_boot.log
+#   logs/system/0.4.ui_server.log
 ###############################################################################
 
 usage() {
@@ -77,9 +78,30 @@ else
   exit 1
 fi
 
+# Persist NODE_COUNT so stop.sh / shutdown.sh can read it without arguments
+mkdir -p "${RUNTIME_DIR:-$PROJECT_ROOT/runtime}"
+echo "$NODE_COUNT" > "${RUNTIME_DIR:-$PROJECT_ROOT/runtime}/node_count"
+
+# Validate LLM credentials before spending time starting infra
+_llm_backend="${LLM_BACKEND:-${LLM_PROVIDER:-openai}}"
+if [[ "$_llm_backend" == "openai" ]]; then
+  if [[ -z "${OPENAI_API_KEY:-}" || "${OPENAI_API_KEY:-}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
+    echo "[FATAL] OPENAI_API_KEY is not set or is still a placeholder."
+    echo "[HINT]  Copy .env.example → .env and set a real OPENAI_API_KEY, or switch to LLM_BACKEND=ollama."
+    exit 1
+  fi
+fi
+if [[ "$_llm_backend" == "gemini" ]]; then
+  if [[ -z "${GEMINI_API_KEY:-}" || "${GEMINI_API_KEY:-}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
+    echo "[FATAL] GEMINI_API_KEY is not set or is still a placeholder."
+    echo "[HINT]  Set GEMINI_API_KEY in your .env file."
+    exit 1
+  fi
+fi
+
 # Safe provider banner (no secrets)
-echo "[INFO] LLM_PROVIDER=${LLM_PROVIDER:-openai}"
-if [[ "${LLM_PROVIDER:-openai}" == "ollama" ]]; then
+echo "[INFO] LLM_BACKEND=${_llm_backend}"
+if [[ "$_llm_backend" == "ollama" ]]; then
   echo "[INFO] OLLAMA_MODEL=${OLLAMA_MODEL:-}"
   echo "[INFO] OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}"
 fi
@@ -186,13 +208,39 @@ run_step() {
 }
 
 ###############################################################################
+# Signal handling — clean up any running background step on SIGTERM/SIGINT
+#
+# Without this, killing 1.start.sh while it is waiting on a boot step leaves
+# that step's subprocess running as an orphan. The orphan holds ports and lock
+# files that block a subsequent restart until it is killed manually.
+#
+# _cleanup() kills all background jobs started by this shell (the current boot
+# step, and any tail -f follower). It does NOT kill lightningd or bitcoind —
+# those are managed by their own RPC stop commands and by shutdown.sh.
+# Using 'jobs -p' is intentional: it targets only direct children of this
+# script, not the Lightning/Bitcoin processes started by the boot subscripts.
+###############################################################################
+_cleanup() {
+    echo "[WARN] Signal received — stopping background steps..." >&2
+    # Kill all direct background jobs (step scripts + any tail -f followers).
+    # POSIX while-read loop avoids xargs -r which is GNU-only (breaks on macOS).
+    while IFS= read -r _pid; do kill "$_pid" 2>/dev/null || true; done < <(jobs -p)
+}
+trap '_cleanup; exit 130' TERM INT
+
+###############################################################################
 # Startup sequence
 ###############################################################################
 run_step "0.1.infra_boot"         "$PROJECT_ROOT/scripts/startup/0.1.infra_boot.sh"         "$NODE_COUNT"
 run_step "0.2.control_plane_boot" "$PROJECT_ROOT/scripts/startup/0.2.control_plane_boot.sh"
 run_step "0.3.agent_boot"         "$PROJECT_ROOT/scripts/startup/0.3.agent_boot.sh"         "$VENV_PY"
+run_step "0.4.ui_server"          "$PROJECT_ROOT/scripts/startup/0.4.ui_server.sh"           "$VENV_PY"
+
+UI_HOST="${UI_HOST:-127.0.0.1}"
+UI_PORT="${UI_PORT:-8008}"
 
 echo "=================================================="
 echo "SYSTEM READY"
-echo "Logs: $LOG_DIR"
+echo "Web UI:  http://$UI_HOST:$UI_PORT"
+echo "Logs:    $LOG_DIR"
 echo "=================================================="

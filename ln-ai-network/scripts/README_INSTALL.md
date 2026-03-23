@@ -1,90 +1,108 @@
-# LN AI Project — Installation Overview
+# Installation — `0.install.sh`
 
-This document explains **everything installed by `install.sh` and why**. The goal is that a new contributor can clone the repo, run the installer once, and never have to guess about missing dependencies.
-
----
-
-## Design Principles
-
-- **Deterministic installs** — same result on every machine
-- **No PPAs / no Snap** — avoid brittle external repos
-- **Explicit dependencies** — nothing installed “by accident”
-- **Safe to rerun** — installer can be executed multiple times
-- **WSL-friendly** — avoids common Windows/Linux pitfalls
+`scripts/0.install.sh` is a **one-time** setup script. Run it once on a fresh machine (or WSL instance) before starting the system for the first time.
 
 ---
 
-## What Gets Installed and Why
+## Design principles
 
-### Base Utilities
-Installed to support downloads, archives, JSON parsing, and secure networking.
-
-- curl, wget
-- ca-certificates, gnupg
-- tar
-- jq
-- git
+- **Deterministic** — same result on every machine; no environment-specific branches
+- **No PPAs / no Snap** — only official upstream binaries and apt packages
+- **Explicit dependencies** — nothing installed "by accident"
+- **Safe to rerun** — all steps are idempotent; running twice causes no harm
+- **WSL-friendly** — avoids common Windows/Linux pitfalls (systemd, snap, PATH issues)
 
 ---
 
-### Build Toolchain
+## What gets installed and why
+
+### Base utilities
+
+Required for downloads, archive extraction, JSON parsing, and secure networking.
+
+| Package | Why |
+|---------|-----|
+| `curl`, `wget` | Download Bitcoin Core binaries and source tarballs |
+| `ca-certificates`, `gnupg` | Verify download signatures |
+| `tar` | Extract tarballs |
+| `jq` | Parse JSON in shell scripts |
+| `git` | Clone Core Lightning source |
+
+---
+
+### Build toolchain
+
 Required to compile Core Lightning from source.
 
-- build-essential
-- pkg-config
-- autoconf
-- automake
-- libtool
+| Package | Why |
+|---------|-----|
+| `build-essential` | C/C++ compiler, `make`, `ld` |
+| `pkg-config` | Locate installed libraries during build |
+| `autoconf`, `automake`, `libtool` | Build system generators |
 
 ---
 
-### Cryptography & Storage Libraries
+### Cryptography and storage libraries
+
 Required by Core Lightning.
 
-- libsodium-dev — cryptography & Noise protocol
-- libssl-dev — cryptographic primitives
-- libsqlite3-dev — wallet and state storage
+| Package | Why |
+|---------|-----|
+| `libsodium-dev` | Noise protocol, cryptographic primitives |
+| `libssl-dev` | TLS and additional cryptographic operations |
+| `libsqlite3-dev` | Wallet and HTLC state storage |
 
 ---
 
-### Documentation & Build-Time Tools
+### Documentation and build-time tools
+
 Required for a successful Core Lightning build.
 
-- lowdown — generates man pages
-- gettext — localization tooling
-- python3-mako — template generation
+| Package | Why |
+|---------|-----|
+| `lowdown` | Generates man pages during `make install` |
+| `gettext` | Internationalisation tooling used by the build |
+| `python3-mako` | Template generation for build scripts |
 
 ---
 
-### Python Runtime
-Required for plugins and future AI orchestration.
+### Python runtime
 
-- python3
-- python3-pip
-- python3-venv
+Required for the AI pipeline, MCP server, and web UI.
+
+| Package | Why |
+|---------|-----|
+| `python3`, `python3-pip` | Python interpreter and package manager |
+| `python3-venv` | Creates the isolated `.venv` used by all project code |
+
+The project uses a virtual environment at `.venv/` so that no system Python packages are modified. All project dependencies are in `requirements.txt` and installed into the venv.
 
 ---
 
-### Networking & Event Infrastructure
-Supports debugging and future orchestration.
+### Networking and event infrastructure
 
-- net-tools
-- libzmq3-dev — ZeroMQ support for event-driven workflows
+| Package | Why |
+|---------|-----|
+| `net-tools` | `netstat`, `ifconfig` for debugging connectivity |
+| `libzmq3-dev` | ZeroMQ support (future event-driven workflow hooks) |
 
 ---
 
 ## Bitcoin Core
 
-Installed using **official upstream binaries** from bitcoincore.org.
+Installed from **official upstream binaries** at `bitcoincore.org`.
 
-Why:
-- Matches upstream exactly
-- Avoids broken or outdated PPAs
-- Works consistently in WSL
+**Why binaries instead of source?**
+- Bitcoin Core has a much longer build time than Core Lightning
+- Official binaries are SHA256-verified and GPG-signed
+- Binary releases are consistent across platforms
+- Works reliably in WSL without build-environment quirks
 
 Installed binaries:
-- bitcoind
-- bitcoin-cli
+- `bitcoind` — full node daemon
+- `bitcoin-cli` — RPC client
+
+The installer verifies the SHA256 hash and GPG signature before installing.
 
 ---
 
@@ -92,49 +110,67 @@ Installed binaries:
 
 Installed by **building from source**.
 
-Why:
-- Prebuilt binaries are inconsistent
-- Source builds surface missing dependencies early
-- Maximum flexibility for plugins and extensions
+**Why source instead of binaries?**
+- Prebuilt packages are inconsistent across distributions
+- Source builds surface missing dependencies early rather than at runtime
+- Required for plugin development and custom extensions
+- Allows pinning to a specific commit for reproducibility
 
-Core Lightning is intentionally **not pinned** to a specific version yet. Pinning will be introduced later once the system stabilizes.
+After the build, `lightningd` and `lightning-cli` are placed on `PATH`.
 
 ---
 
-## Filesystem Layout Created
+## Python virtual environment and dependencies
 
-The installer guarantees the following directories exist:
+After installing system packages, the installer:
 
+1. Creates `.venv/` using `python3 -m venv`
+2. Installs all packages listed in `requirements.txt` into the venv
+
+Key Python dependencies include:
+- `fastmcp` — MCP protocol implementation
+- `anthropic`, `openai`, `google-generativeai` — LLM provider SDKs
+- `requests` — HTTP client for Ollama
+- `pytest` — test runner
+
+---
+
+## Filesystem layout created
+
+The installer guarantees these directories exist before `1.start.sh` runs:
+
+```
 runtime/
   bitcoin/
   lightning/
-
 logs/
-temp/
+```
 
-These directories are contracts used by all runtime scripts.
-
----
-
-## What install.sh Does NOT Do
-
-- Start Bitcoin or Lightning processes
-- Create node-specific runtime state
-- Configure regtest or ports
-- Perform funding or channel setup
-
-Those responsibilities belong to `start.sh` and higher-level scripts.
+These are contracts — all runtime scripts assume they exist. `1.start.sh` creates additional subdirectories (`runtime/agent/`, `runtime/bitcoin/shared/`, `runtime/lightning/node-N/`) when the system first starts.
 
 ---
 
-## Summary
+## What `0.install.sh` does NOT do
 
-After running `install.sh`, the system guarantees:
+- Start any processes (Bitcoin, Lightning, agent, UI)
+- Create node-specific runtime state or wallets
+- Configure `.env` or set LLM credentials
+- Set up channels or fund wallets
 
-- Bitcoin Core is installed and callable
-- Core Lightning is installed and callable
-- All required dependencies are present
-- Directory layout is prepared
-- No manual fixes are required
+Those responsibilities belong to `1.start.sh` and the startup subscripts.
 
-This creates a stable base for multi-node Lightning experiments and AI-driven orchestration.
+---
+
+## After installation
+
+```bash
+# 1. Configure your LLM provider
+cp .env.example .env
+# Edit .env: set LLM_BACKEND and the corresponding API key
+
+# 2. Start the full system
+./scripts/1.start.sh 2
+
+# 3. Open the web UI
+# → http://127.0.0.1:8008
+```

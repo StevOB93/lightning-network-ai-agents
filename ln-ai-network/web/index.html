@@ -1,75 +1,423 @@
 <!doctype html>
+<!--
+  Lightning Agent — single-page application
+
+  Structure:
+    .page-shell
+    ├── .status-bar          — persistent top bar: build tag, agent status, counters
+    ├── .tab-bar             — Agent / Pipeline / Network / Logs tabs
+    └── .tab-panel × 4      — only one panel visible at a time (hidden attr toggled by app.js)
+        ├── #tab-agent       — prompt input, summary card
+        ├── #tab-pipeline    — 3-stage cards (Translator → Planner → Executor)
+        ├── #tab-network     — D3 force-directed network graph
+        └── #tab-logs        — live trace log, archive panel, inbox/outbox queues
+
+  JS data flow (app.js):
+    SSE /api/events  → status event  → update status bar + inbox/outbox lists
+                     → pipeline_result event → render all stage panels + summary card
+                     → trace event   → append rows to #trace-log (deduped by ts+kind)
+    /api/network     → polled on demand → render D3 graph
+    /api/logs        → polled on archive panel open → render #archive-list
+    /api/logs/{file} → polled on archive entry click → render inline trace
+
+  ID naming conventions:
+    #tab-{name}        — tab panel container
+    #badge-{stage}     — stage status badge (ok / fail / running / —)
+    #ind-{name}        — status bar indicator group
+    #{name}-display    — stage output content area
+    #{name}-count      — queue item count badge
+-->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lightning Agent Demo</title>
+  <title>Lightning Agent</title>
+  <!-- Space Grotesk: UI labels; IBM Plex Mono: code/JSON/trace values -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- D3 v7: used only for the network graph force simulation in #tab-network -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div class="page-shell">
-    <header class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow">Lightning AI Demo</p>
-        <h1>Show the agent thinking with tools, not terminal noise.</h1>
-        <p class="lede">This UI sends the same inbox requests as the CLI, then watches the outbox so a non-technical audience can see what the agent did.</p>
+
+    <!-- ── Status bar ── persistent across all tabs ── -->
+    <header class="status-bar">
+      <div class="status-bar-brand">
+        <span class="bolt">⚡</span>
+        <span class="brand-name">Lightning Agent</span>
+        <!-- Populated from the `build` field of pipeline_result SSE events -->
+        <code class="build-tag" id="pipeline-build">—</code>
       </div>
-      <div class="hero-status">
-        <div class="status-card">
-          <span class="status-label">Agent Lock</span>
-          <code id="agent-lock">Checking...</code>
+      <div class="status-bar-indicators">
+        <!-- Agent lock indicator: green dot when agent.lock file is present -->
+        <div class="indicator" id="ind-agent">
+          <span class="dot"></span>
+          <span class="ind-label">Agent</span>
+          <code class="ind-value" id="agent-lock-val">checking…</code>
         </div>
-        <div class="status-card accent">
-          <span class="status-label">Last Request</span>
-          <code id="last-request">None</code>
+        <!-- request_id from the most recent pipeline_result event -->
+        <div class="indicator">
+          <span class="ind-label">Last&nbsp;Request</span>
+          <code class="ind-value" id="last-request-id">—</code>
         </div>
+        <!-- Combined inbox + outbox message count from /api/status -->
+        <div class="indicator">
+          <span class="ind-label">Messages</span>
+          <code class="ind-value" id="msg-count">—</code>
+        </div>
+      </div>
+      <!-- System controls — top-right corner of status bar -->
+      <div class="status-bar-actions">
+        <button id="restart-btn" class="btn-warning-sm" title="Restart all nodes and the AI agent">↺ Restart</button>
+        <button id="shutdown-btn" class="btn-danger-sm" title="Shut down all nodes and the AI agent">⏻ Shutdown</button>
       </div>
     </header>
 
-    <main class="grid">
-      <section class="panel controls">
-        <h2>Run a Demo</h2>
-        <p>Use the deterministic health check or the Gemini summary path.</p>
-        <div class="button-row">
-          <button id="health-btn" class="primary">Queue Health Check</button>
-          <button id="refresh-btn" class="secondary">Refresh Status</button>
+    <!-- ── Tab bar ── click sets data-tab active, app.js shows matching panel ── -->
+    <nav class="tab-bar">
+      <button class="tab-btn active" data-tab="agent">Agent</button>
+      <button class="tab-btn" data-tab="pipeline">Pipeline</button>
+      <button class="tab-btn" data-tab="network">Network</button>
+      <button class="tab-btn" data-tab="logs">Logs</button>
+      <button class="tab-btn" data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- ── Tab: Agent ── prompt input + most-recent result summary ── -->
+    <div class="tab-panel" id="tab-agent">
+
+      <!-- Prompt hero: primary action area -->
+      <section class="card prompt-hero">
+        <div class="prompt-hero-copy">
+          <h1>What should the agent do?</h1>
+          <p class="lede">Type any Lightning Network instruction. The agent will translate it into a plan, then execute each step via MCP tools.</p>
         </div>
-        <label class="prompt-block" for="prompt-input">
-          <span>Freeform Gemini Prompt</span>
-          <textarea id="prompt-input" rows="4">Run a network health check and summarize what is working.</textarea>
-        </label>
-        <button id="ask-btn" class="primary wide">Queue Gemini Request</button>
-        <div class="mini-log" id="action-log">Ready.</div>
+        <div class="prompt-hero-form">
+          <textarea
+            id="prompt-input"
+            rows="3"
+            placeholder="e.g. Open a 500,000 sat channel to node 02abc… then pay invoice lnbc…"
+          ></textarea>
+          <div class="prompt-actions">
+            <!-- Queue Request: POST /api/ask → writes to inbox.jsonl -->
+            <button id="ask-btn" class="btn-primary">
+              <span class="btn-icon">▶</span> Queue Request
+            </button>
+            <!-- Health Check: POST /api/health → writes health_check to inbox -->
+            <button id="health-btn" class="btn-secondary">Health Check</button>
+            <!-- Manual refresh: re-fetches /api/status without waiting for SSE -->
+            <button id="refresh-btn" class="btn-ghost">↻ Refresh</button>
+          </div>
+          <!-- Transient action feedback (e.g. "Queued req #7", "Error: ...") -->
+          <div class="action-log" id="action-log">Ready.</div>
+        </div>
       </section>
 
-      <section class="panel result">
-        <div class="panel-header">
-          <h2>Latest Agent Report</h2>
-          <span id="last-ts">Waiting for data</span>
+      <!-- Summary card: shown after a pipeline_result SSE event arrives -->
+      <section class="card summary-card" id="summary-card" style="display:none">
+        <button class="copy-btn" data-target="summary-body" title="Copy">⎘</button>
+        <div class="summary-header">
+          <!-- ✓ (success) or ✗ (failure) — set by renderSummary() in app.js -->
+          <span class="summary-icon" id="summary-icon">✓</span>
+          <div>
+            <div class="summary-title">Agent Summary</div>
+            <!-- Formatted timestamp of the pipeline_result event -->
+            <div class="summary-ts" id="summary-ts"></div>
+          </div>
         </div>
-        <pre id="report-content" class="report-box">No agent output yet.</pre>
+        <!-- Pre-formatted LLM summary or error message -->
+        <pre class="summary-body" id="summary-body"></pre>
       </section>
 
-      <section class="panel timeline">
-        <div class="panel-header">
-          <h2>Recent Inbox</h2>
-          <span>Newest queued commands</span>
+      <!-- Metrics card: aggregate stats over all past queries -->
+      <section class="card metrics-card" id="metrics-card">
+        <div class="card-header"><h2>Query Metrics</h2></div>
+        <div id="metrics-content" class="metrics-grid">
+          <div class="empty-state">No queries yet.</div>
         </div>
-        <div id="inbox-list" class="list"></div>
       </section>
 
-      <section class="panel timeline">
-        <div class="panel-header">
-          <h2>Recent Outbox</h2>
-          <span>Newest agent replies</span>
+    </div><!-- /tab-agent -->
+
+    <!-- ── Tab: Pipeline ── stage-by-stage breakdown ── -->
+    <div class="tab-panel" id="tab-pipeline" hidden>
+
+      <section class="pipeline-stages">
+        <!-- Visual connector line drawn behind the stage cards via CSS -->
+        <div class="stage-connector"></div>
+
+        <!-- Stage 1: Translator — NL prompt → IntentBlock (JSON) -->
+        <div class="stage-card" id="stage-translator">
+          <div class="stage-header">
+            <span class="stage-num">1</span>
+            <div>
+              <div class="stage-title">Translator</div>
+              <div class="stage-subtitle">Natural language → Intent</div>
+            </div>
+            <!-- ok / fail / running / — — set by renderStages() -->
+            <span class="stage-badge" id="badge-translator">—</span>
+            <button class="copy-btn" data-target="intent-display" title="Copy">⎘</button>
+          </div>
+          <!-- Populated by renderIntent() in app.js -->
+          <div class="stage-body" id="intent-display">
+            <div class="empty-state">No pipeline run yet.</div>
+          </div>
         </div>
-        <div id="outbox-list" class="list"></div>
+
+        <!-- Stage 2: Planner — IntentBlock → ExecutionPlan -->
+        <div class="stage-card" id="stage-planner">
+          <div class="stage-header">
+            <span class="stage-num">2</span>
+            <div>
+              <div class="stage-title">Planner</div>
+              <div class="stage-subtitle">Intent → Execution plan</div>
+            </div>
+            <span class="stage-badge" id="badge-planner">—</span>
+            <button class="copy-btn" data-target="plan-display" title="Copy">⎘</button>
+          </div>
+          <!-- Populated by renderPlan() — rationale + ordered step cards -->
+          <div class="stage-body" id="plan-display">
+            <div class="empty-state">No pipeline run yet.</div>
+          </div>
+        </div>
+
+        <!-- Stage 3: Executor — ExecutionPlan → MCP tool call results -->
+        <div class="stage-card" id="stage-executor">
+          <div class="stage-header">
+            <span class="stage-num">3</span>
+            <div>
+              <div class="stage-title">Executor</div>
+              <div class="stage-subtitle">Plan → MCP tool calls</div>
+            </div>
+            <span class="stage-badge" id="badge-executor">—</span>
+            <button class="copy-btn" data-target="exec-display" title="Copy">⎘</button>
+          </div>
+          <!-- Populated by renderExecution() — per-step ok/fail/skip rows -->
+          <div class="stage-body" id="exec-display">
+            <div class="empty-state">No pipeline run yet.</div>
+          </div>
+        </div>
       </section>
-    </main>
+
+    </div><!-- /tab-pipeline -->
+
+    <!-- ── Tab: Network ── D3 force-directed graph of nodes + channels ── -->
+    <div class="tab-panel" id="tab-network" hidden>
+
+      <section class="card network-card">
+        <div class="card-header">
+          <h2>Network Graph</h2>
+          <div class="card-header-actions">
+            <!-- Triggers fetchNetwork() → GET /api/network → re-renders graph -->
+            <button id="network-refresh-btn" class="btn-ghost small">↻ Refresh</button>
+            <span class="network-hint" id="network-hint">Populated from tool call results</span>
+          </div>
+        </div>
+        <!-- SVG is injected here by initNetworkGraph() / renderNetwork() -->
+        <div id="network-viz" class="network-viz">
+          <div class="empty-state">Run a health check or node query to populate the graph.</div>
+        </div>
+      </section>
+
+    </div><!-- /tab-network -->
+
+    <!-- ── Tab: Logs ── live trace + archive + inbox/outbox queues ── -->
+    <div class="tab-panel" id="tab-logs" hidden>
+
+      <div class="bottom-grid">
+
+        <!-- Trace log card -->
+        <section class="card trace-card">
+          <div class="card-header">
+            <h2>Live Trace Log</h2>
+            <div class="card-header-actions">
+              <!-- Copy button moved here, left of Archive, so it's always visible -->
+              <button class="copy-btn copy-btn-inline" data-target="trace-log" title="Copy trace log">⎘</button>
+              <!-- Toggles #archive-panel; fetches /api/logs on first open -->
+              <button id="archive-toggle-btn" class="btn-ghost small">Archive ▾</button>
+              <!-- Clears the DOM trace rows (does not delete trace.log on disk) -->
+              <button class="clear-btn" data-clear="trace-log" title="Clear">✕</button>
+              <!-- Indicates trace rows are appended automatically via SSE -->
+              <span class="auto-badge">auto</span>
+            </div>
+          </div>
+          <!-- Trace rows appended by renderTrace() as SSE trace events arrive -->
+          <div id="trace-log" class="trace-log">
+            <div class="empty-state">No trace events yet.</div>
+          </div>
+
+          <!-- Archive panel — toggled by #archive-toggle-btn; hidden by default -->
+          <div id="archive-panel" class="archive-panel" hidden>
+            <div class="archive-panel-header">
+              <span class="archive-panel-title">Past Queries</span>
+              <!-- Re-fetches /api/logs and re-renders the list -->
+              <button id="archive-refresh-btn" class="btn-ghost small">↻</button>
+            </div>
+            <!-- Search bar and status filter pills -->
+            <div class="archive-filters">
+              <input id="archive-search" type="text" placeholder="Search queries…" class="archive-search-input">
+              <div class="archive-status-filters">
+                <button class="arch-filter-btn active" data-status="">All</button>
+                <button class="arch-filter-btn" data-status="ok">ok</button>
+                <button class="arch-filter-btn" data-status="partial">partial</button>
+                <button class="arch-filter-btn" data-status="failed">failed</button>
+              </div>
+            </div>
+            <!-- Archive entries rendered by renderArchiveList() in app.js -->
+            <!-- Clicking an entry fetches /api/logs/{filename} and expands inline trace -->
+            <div id="archive-list" class="archive-list">
+              <div class="empty-state">No archived queries yet.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Inbox / Outbox queue panels -->
+        <div class="queue-panels">
+          <!-- Inbox: recent entries from /api/status.inbox_entries -->
+          <section class="card queue-card">
+            <div class="card-header">
+              <h2>Inbox</h2>
+              <!-- Updated by renderQueues() on each status event -->
+              <span class="queue-count" id="inbox-count">0</span>
+              <button id="inbox-clear-btn" class="btn-ghost-sm" title="Clear display">✕ Clear</button>
+            </div>
+            <div id="inbox-list" class="item-list"></div>
+          </section>
+          <!-- Outbox: recent entries from /api/status.outbox_entries -->
+          <section class="card queue-card">
+            <div class="card-header">
+              <h2>Outbox</h2>
+              <span class="queue-count" id="outbox-count">0</span>
+              <button id="outbox-clear-btn" class="btn-ghost-sm" title="Clear display">✕ Clear</button>
+            </div>
+            <div id="outbox-list" class="item-list"></div>
+          </section>
+        </div>
+
+      </div><!-- /bottom-grid -->
+
+      <!-- Crash kit card — one-click debug snapshot for bug reports -->
+      <section class="card crash-kit-card">
+        <div class="card-header">
+          <h2>Crash Kit</h2>
+          <div class="card-header-actions">
+            <span class="crash-kit-hint">Captures full system state for bug reports</span>
+            <button id="crash-kit-btn" class="btn-secondary">⎘ Copy Crash Kit</button>
+          </div>
+        </div>
+        <!-- Preview of the generated crash kit text; populated on button click -->
+        <pre class="crash-kit-preview" id="crash-kit-preview">Click "Copy Crash Kit" to generate a debug snapshot and copy it to the clipboard.</pre>
+      </section>
+
+    </div><!-- /tab-logs -->
+
+    <!-- ── Tab: Settings ── config form ── -->
+    <div class="tab-panel" id="tab-settings" hidden>
+
+      <section class="card settings-card">
+        <div class="card-header">
+          <h2>Configuration</h2>
+          <span class="settings-note">Changes are saved to <code>.env</code> and take effect on next restart.</span>
+        </div>
+
+        <div class="settings-groups">
+
+          <!-- LLM Provider -->
+          <div class="settings-group">
+            <div class="settings-group-title">LLM Provider</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-llm-backend">Backend</label>
+                <select id="cfg-llm-backend" class="settings-select" data-key="LLM_BACKEND">
+                  <option value="openai">OpenAI</option>
+                  <option value="ollama">Ollama (local)</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="anthropic">Anthropic</option>
+                </select>
+              </div>
+              <div class="settings-field">
+                <label for="cfg-openai-model">OpenAI Model</label>
+                <input id="cfg-openai-model" class="settings-input" type="text" data-key="OPENAI_MODEL" placeholder="gpt-4o">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ollama-model">Ollama Model</label>
+                <input id="cfg-ollama-model" class="settings-input" type="text" data-key="OLLAMA_MODEL" placeholder="llama3.2">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ollama-url">Ollama Base URL</label>
+                <input id="cfg-ollama-url" class="settings-input" type="text" data-key="OLLAMA_BASE_URL" placeholder="http://localhost:11434">
+              </div>
+            </div>
+          </div>
+
+          <!-- Timeouts -->
+          <div class="settings-group">
+            <div class="settings-group-title">Timeouts</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-mcp-timeout">MCP Call Timeout (s)</label>
+                <input id="cfg-mcp-timeout" class="settings-input" type="number" data-key="MCP_CALL_TIMEOUT_S" min="5" max="300">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-node-start-timeout">Node Start Timeout (s)</label>
+                <input id="cfg-node-start-timeout" class="settings-input" type="number" data-key="MCP_NODE_START_TIMEOUT_S" min="5" max="300">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-node-stop-timeout">Node Stop Timeout (s)</label>
+                <input id="cfg-node-stop-timeout" class="settings-input" type="number" data-key="MCP_NODE_STOP_TIMEOUT_S" min="5" max="300">
+              </div>
+            </div>
+          </div>
+
+          <!-- Network -->
+          <div class="settings-group">
+            <div class="settings-group-title">Network</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-ln-bind-host">Lightning Bind Host</label>
+                <input id="cfg-ln-bind-host" class="settings-input" type="text" data-key="LN_BIND_HOST" placeholder="127.0.0.1">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ln-announce-host">Lightning Announce Host</label>
+                <input id="cfg-ln-announce-host" class="settings-input" type="text" data-key="LN_ANNOUNCE_HOST" placeholder="(defaults to bind host)">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-regtest-height">Regtest Target Block Height</label>
+                <input id="cfg-regtest-height" class="settings-input" type="number" data-key="REGTEST_TARGET_HEIGHT" min="1" max="100000">
+              </div>
+            </div>
+          </div>
+
+          <!-- UI Server -->
+          <div class="settings-group">
+            <div class="settings-group-title">UI Server</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-ui-host">Host</label>
+                <input id="cfg-ui-host" class="settings-input" type="text" data-key="UI_HOST" placeholder="127.0.0.1">
+              </div>
+              <div class="settings-field">
+                <label for="cfg-ui-port">Port</label>
+                <input id="cfg-ui-port" class="settings-input" type="number" data-key="UI_PORT" min="1024" max="65535">
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /settings-groups -->
+
+        <div class="settings-actions">
+          <button id="settings-save-btn" class="btn-primary">Save to .env</button>
+          <span class="settings-status" id="settings-status"></span>
+        </div>
+      </section>
+
+    </div><!-- /tab-settings -->
+
   </div>
+
+  <!-- app.js deferred to end of body: DOM is ready when the script executes -->
   <script src="/app.js"></script>
 </body>
 </html>

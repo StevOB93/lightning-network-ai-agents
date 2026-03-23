@@ -66,7 +66,7 @@ echo "[AGENT] Log file: $AGENT_LOG"
 
 (
   cd "$PROJECT_ROOT"
-  exec "$VENV_PY" -u -m ai.agent
+  exec "$VENV_PY" -u -m ai.pipeline
 ) >"$AGENT_LOG" 2>&1 &
 
 AGENT_PID=$!

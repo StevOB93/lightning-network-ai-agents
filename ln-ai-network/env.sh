@@ -27,6 +27,28 @@ export LN_RUNTIME="$RUNTIME_DIR"
 export BITCOIN_RPC_USER="${BITCOIN_RPC_USER:-lnrpc}"
 export BITCOIN_RPC_PASSWORD="${BITCOIN_RPC_PASSWORD:-lnrpcpass}"
 
+# Lightning node bind and announce addresses — controls cross-machine peer connectivity.
+#
+# LN_BIND_HOST: the IP address lightningd binds its peer-to-peer port on.
+#   "127.0.0.1" (default) means only processes on this machine can connect as peers.
+#   "0.0.0.0"             accepts connections on all interfaces (LAN/WAN).
+#   A specific LAN IP     (e.g. "192.168.1.10") restricts binding to one NIC.
+#
+# LN_ANNOUNCE_HOST: the IP or hostname advertised to the Lightning gossip network
+#   so remote peers know where to reach this node's listening port.
+#   Defaults to LN_BIND_HOST, which is correct for single-machine setups.
+#   Override when behind NAT: set LN_ANNOUNCE_HOST to your public IP or DDNS hostname
+#   while keeping LN_BIND_HOST=0.0.0.0 so the OS binds all interfaces but advertises
+#   the externally-reachable address to peers.
+#
+# To connect nodes across two machines:
+#   On each machine, add to .env:
+#     LN_BIND_HOST=0.0.0.0
+#     LN_ANNOUNCE_HOST=<this-machine's-public-or-LAN-IP>
+#   Then open the Lightning port (LIGHTNING_BASE_PORT + node number) in your firewall.
+export LN_BIND_HOST="${LN_BIND_HOST:-127.0.0.1}"
+export LN_ANNOUNCE_HOST="${LN_ANNOUNCE_HOST:-$LN_BIND_HOST}"
+
 # Safety check: prevent running with placeholder key
 if [[ "${LLM_PROVIDER:-}" == "gemini" ]]; then
   if [[ -z "${GEMINI_API_KEY:-}" ]]; then

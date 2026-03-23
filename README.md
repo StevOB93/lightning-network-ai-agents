@@ -1,157 +1,165 @@
-# LN AI Network (Regtest) — Prompt-Driven Lightning Agent
+# Lightning Network AI Agent
 
-This repo runs a **prompt-driven AI Lightning agent** on **regtest** that can autonomously complete workflows (e.g., end-to-end payments), while respecting a strict execution boundary:
+A prompt-driven AI agent that autonomously executes Lightning Network workflows on regtest. Type a plain-English instruction — the agent plans and runs every step via MCP tools.
 
-**The agent may ONLY act via MCP tools** (no direct shell actions).
-
----
-
-## What you get
-
-- `ai/agent.py`: the controller/agent
-  - Reads prompts from `runtime/agent/inbox.jsonl`
-  - Writes reports to `runtime/agent/outbox.jsonl`
-  - Logs a full per-prompt trace to `runtime/agent/trace.log` (**resets every new prompt**)
-  - Enforces deterministic safety policies:
-    - fail fast on tool errors
-    - no redundant read-only tool calls unless state changed
-    - oscillation detection
-    - requires tools when goal unmet
-    - deterministic tool-arg normalization (unwraps nested args + coerces ints)
-
-- `mcp/ln_mcp_server.py`: the MCP tool boundary
-  - Executes `bitcoin-cli` / `lightning-cli` operations
-  - Exposes a tool surface the agent calls by name
-
-- `scripts/restart_agent.sh`: clean restart + fresh mode
-
-More detail:
-- `docs/README.md`
+**The agent ONLY acts via MCP tools. No direct shell access.**
 
 ---
 
 ## Quick Start
 
-### 1) Start the agent (fresh run)
+### Step 1 — One-time setup (first time only)
+
 ```bash
-cd ~/lightning-network-ai-agents/ln-ai-network
-scripts/restart_agent.sh fresh
-tail -n 20 runtime/agent/agent.log
+./install.sh
 ```
 
-You should see an `agent_start` line with a `build` tag.
+Installs Bitcoin Core, Core Lightning, Python venv, and all dependencies.
 
-### 2) Send a prompt
-You should have a shell helper function `ai_prompt`. Example:
+### Step 2 — Configure your LLM
+
 ```bash
-ai_prompt "SMOKE TEST: call network_health and summarize."
+cp ln-ai-network/.env.example ln-ai-network/.env
 ```
 
-Check output:
+Edit `ln-ai-network/.env` and set your LLM key:
+
+| Backend | What to set |
+|---------|------------|
+| OpenAI (default) | `OPENAI_API_KEY=sk-...` and `ALLOW_LLM=1` |
+| Ollama (local, free) | `LLM_BACKEND=ollama` and `ALLOW_LLM=1` |
+| Gemini | `GEMINI_API_KEY=...` and `LLM_BACKEND=gemini` and `ALLOW_LLM=1` |
+
+### Step 3 — Start
+
 ```bash
-tail -n 5 runtime/agent/outbox.jsonl
+./start.sh
+```
+
+The system starts, and the **web UI opens automatically** at `http://127.0.0.1:8008`.
+
+### Step 4 — Stop
+
+```bash
+./stop.sh
+```
+
+Cleanly shuts down Bitcoin, Lightning, and the AI pipeline.
+
+---
+
+## Using the Web UI
+
+The dashboard at `http://127.0.0.1:8008` is the main interface.
+
+Type any Lightning Network instruction into the prompt box and press **Enter** to submit (Shift+Enter for a newline):
+
+```
+Check the network health and tell me the status of all nodes.
+```
+
+```
+Open a 500,000 sat channel from node 1 to node 2.
+```
+
+```
+Have node 2 create an invoice for 10,000 msat, then pay it from node 1.
+```
+
+The dashboard shows live:
+- **Pipeline stage cards** — Translator → Intent, Planner → Steps, Executor → Results
+- **Network graph** — nodes and channels, auto-populated from tool results
+- **Live trace log** — real-time event stream
+- **Agent summary** — final answer from the agent
+
+---
+
+## Architecture
+
+```
+Prompt → [Translator] → Intent → [Planner] → Plan → [Executor] → Results → [Summarizer] → Answer
+```
+
+| Stage | Does | Uses LLM? |
+|-------|------|-----------|
+| Translator | Text → structured IntentBlock (goal, intent, success criteria) | Yes |
+| Planner | IntentBlock → ordered tool steps with rationale | Yes |
+| Executor | Runs MCP tool calls, retries, value chaining | No |
+| Summarizer | Tool results → human-readable answer + success/failure verdict | Yes |
+
+**Multi-turn**: the last 4 exchanges are carried as context — follow-up prompts like "now pay that invoice" work naturally.
+
+**Goal verification**: after payment/channel operations, a read-only check confirms the action succeeded.
+
+---
+
+## Running Tests
+
+```bash
+cd ln-ai-network
+source .venv/bin/activate
+python -m pytest ai/tests/ -v
 ```
 
 ---
 
-## End-to-End Payment Test (Regtest)
+## Development Commands
 
-Use this prompt to perform a full E2E payment flow.
-
-```bash
-ai_prompt 'END-TO-END PAYMENT TEST (REGTEST) — MUST COMPLETE OR REPORT EXACT BLOCKER
-
-BOUNDARY:
-- MCP tools only. No shell instructions.
-- Fail fast: if any tool returns an error, STOP and report it.
-- Nodes are 1-based: node=1 and node=2 only.
-
-SUCCESS CRITERIA:
-- node-1 and node-2 are running
-- node-1 is connected to node-2 as a peer
-- at least one confirmed/usable channel exists between node-1 and node-2
-- node-2 creates an invoice for exactly 10,000 msat
-- node-1 pays it using the exact payload.bolt11 string
-- output strict JSON with e2e_ok=true
-
-OUTPUT FORMAT (STRICT JSON ONLY):
-Return ONE JSON object:
-{
-  "e2e_ok": boolean,
-  "steps": [ {"name": string, "status": "ok"|"skip"|"fail", "details": object} ],
-  "artifacts": {
-    "node2_id": string|null,
-    "node2_host": string|null,
-    "node2_port": number|null,
-    "funding": {"node1_addr": string|null, "node2_addr": string|null, "miner_addr": string|null},
-    "invoice": {"bolt11": string|null, "msat": number|null, "label": string|null},
-    "payment": {"status": string|null, "preimage": string|null}
-  },
-  "final_state": {
-    "nodes_running": number,
-    "node1_peers": number,
-    "node1_channels": number,
-    "node2_peers": number,
-    "node2_channels": number
-  },
-  "tool_calls": [ {"tool": string, "args": object, "result_summary": string} ],
-  "blocker": string|null
-}
-
-PLAN:
-1) network_health
-2) ensure node-2 running (ln_node_status, ln_node_start if needed)
-3) ln_getinfo node=2 -> get id + binding
-4) ln_connect from_node=1 -> node-2
-5) fund both nodes (btc_wallet_ensure miner, ln_newaddr both, btc_sendtoaddress both, mine blocks)
-6) open channel (ln_openchannel), mine confirmations until active
-7) ln_invoice node=2 amount_msat=10000
-8) ln_pay from_node=1 using EXACT invoice string payload.bolt11
-9) verify + output strict JSON only'
-```
+| Command | What it does |
+|---------|-------------|
+| `./start.sh` | Start the full system |
+| `./stop.sh` | Stop everything cleanly |
+| `./install.sh` | One-time install |
+| `./start.sh 3` | Start with 3 Lightning nodes |
+| `cd ln-ai-network && ./scripts/restart_agent.sh` | Restart just the AI pipeline (no infra restart) |
+| `cd ln-ai-network && ./scripts/restart_agent.sh fresh` | Restart with cleared inbox/outbox |
 
 ---
 
-## Logs & Debugging
+## Logs
 
-### Outbox (agent reports)
-```bash
-tail -n 3 runtime/agent/outbox.jsonl
+| File | Contents |
+|------|---------|
+| `ln-ai-network/runtime/agent/trace.log` | Per-prompt trace (resets each request) |
+| `ln-ai-network/runtime/agent/outbox.jsonl` | Pipeline results (all history) |
+| `ln-ai-network/logs/system/0.3.agent_boot.log` | Pipeline process log |
+| `ln-ai-network/logs/system/0.4.ui_server.log` | Web UI server log |
+| `ln-ai-network/logs/system/shutdown.log` | Shutdown log |
+
+---
+
+## Troubleshooting
+
+**Web UI doesn't open automatically**
+Navigate manually to `http://127.0.0.1:8008`. On WSL, ensure your Windows browser can reach localhost.
+
+**"OPENAI_API_KEY not set" error**
+Copy `.env.example` to `.env` and set a real API key, or switch to Ollama with `LLM_BACKEND=ollama`.
+
+**Agent not responding to prompts**
+Check `ln-ai-network/logs/system/0.3.agent_boot.log`. Ensure `ALLOW_LLM=1` is set in `.env`.
+
+**bitcoind / lightningd not found**
+Run `./install.sh` to install the required binaries.
+
+**Port conflicts**
+Override ports in `.env`: `BITCOIN_RPC_PORT`, `LIGHTNING_BASE_PORT`, `UI_PORT`.
+
+---
+
+## Project Layout
+
 ```
-
-### Trace (full per-prompt, resets each prompt)
-```bash
-tail -n 120 runtime/agent/trace.log
+lightning-network-ai-agents/
+├── start.sh            ← START HERE
+├── stop.sh             ← stop everything
+├── install.sh          ← one-time install
+└── ln-ai-network/
+    ├── ai/             # Pipeline: translator, planner, executor, summarizer, models
+    ├── mcp/            # MCP tool server (bitcoin-cli / lightning-cli boundary)
+    ├── scripts/        # Boot scripts, agent restart, UI server
+    │   └── ui_server.py
+    ├── web/            # Frontend (HTML, JS, CSS)
+    ├── .env.example    # Copy to .env and fill in secrets
+    └── runtime/        # Created at runtime (inbox, outbox, logs, locks)
 ```
-
-### Agent runtime log
-```bash
-tail -n 120 runtime/agent/agent.log
-```
-
-### Save a trace run
-```bash
-mkdir -p runtime/agent/archive
-cp runtime/agent/trace.log runtime/agent/archive/trace.$(date +%Y%m%d_%H%M%S).log
-```
-
-For deeper details on tools and errors, see:
-- `docs/TOOLS.md`
-- `docs/TROUBLESHOOTING.md`
-
-# Documentation Index
-
-- **Tools**: `TOOLS.md` — MCP tool catalog, arguments, expected usage.
-- **Troubleshooting**: `TROUBLESHOOTING.md` — common failures, how to collect logs, fixes.
-
-## Recommended workflow
-
-1) Start agent:
-   - `scripts/restart_agent.sh fresh`
-
-2) Run the E2E payment prompt (see docs/quickstart/ `quickstart.md`)
-
-3) If it fails, collect:
-   - `tail -n 1 runtime/agent/outbox.jsonl`
-   - `tail -n 120 runtime/agent/trace.log`
-   - `tail -n 120 runtime/agent/agent.log`

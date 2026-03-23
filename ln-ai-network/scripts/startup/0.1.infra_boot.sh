@@ -28,8 +28,11 @@ if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]] || [[ "$NODE_COUNT" -lt 1 ]]; then
   exit 2
 fi
 
-# Deterministic contract
-TARGET_HEIGHT=1200
+# Minimum block height to reach before the network is considered ready.
+# 1200 is the standard regtest baseline (sufficient coinbase maturity for all
+# test operations). Override with REGTEST_TARGET_HEIGHT in .env to speed up
+# quick local dev runs or use a higher value for specific test scenarios.
+TARGET_HEIGHT="${REGTEST_TARGET_HEIGHT:-1200}"
 WALLET_NAME="shared-wallet"
 
 # MUST match MCP server defaults and other scripts unless overridden via env.sh/.env
@@ -172,10 +175,31 @@ NODE1_LOG="$NODE1_DIR/lightningd.log"
 if ! lightning-cli --network=regtest --lightning-dir="$NODE1_DIR" getinfo >/dev/null 2>&1; then
   echo "[INFRA] Starting lightningd node-1 (required baseline)..."
 
+  # LN_BIND_HOST / LN_ANNOUNCE_HOST come from env.sh (sourced above).
+  # Default "127.0.0.1" keeps single-machine behaviour — no inbound connections from
+  # other machines.  Set both in .env to allow cross-machine Lightning peer connections:
+  #   LN_BIND_HOST=0.0.0.0          (bind all interfaces)
+  #   LN_ANNOUNCE_HOST=<public-ip>  (advertise the externally-reachable address)
+  #
+  # Address flag logic:
+  #   --addr=HOST:PORT       → binds AND announces (use when bind == announce)
+  #   --bind-addr=HOST:PORT  → binds only, no announce (use to separate the two)
+  # Passing both --bind-addr and --addr for the SAME address causes lightningd to
+  # report "Duplicate announce address", so we only use --bind-addr when the hosts
+  # actually differ.
+  if [[ "$LN_BIND_HOST" == "$LN_ANNOUNCE_HOST" ]]; then
+    LN_ADDR_ARGS=("--addr=${LN_BIND_HOST}:${NODE1_PORT}")
+  else
+    LN_ADDR_ARGS=(
+      "--bind-addr=${LN_BIND_HOST}:${NODE1_PORT}"
+      "--addr=${LN_ANNOUNCE_HOST}:${NODE1_PORT}"
+    )
+  fi
+
   lightningd \
     --network=regtest \
     --lightning-dir="$NODE1_DIR" \
-    --addr=127.0.0.1:"$NODE1_PORT" \
+    "${LN_ADDR_ARGS[@]}" \
     --bitcoin-rpcconnect=127.0.0.1 \
     --bitcoin-rpcport="$BITCOIN_RPC_PORT" \
     --bitcoin-rpcuser="$RPC_USER" \
