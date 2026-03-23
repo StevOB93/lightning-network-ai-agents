@@ -44,15 +44,14 @@ source env.sh               # loads .env + sets runtime paths; warns on missing 
 ```bash
 cd ln-ai-network
 python -m pytest ai/tests/ -v                                    # full suite (no API keys needed)
-python -m pytest ai/tests/test_ollama_backend.py -v             # single file
-python -m pytest ai/tests/test_factory.py::TestFactoryRouting   # single class
+python -m pytest ai/tests/test_llm_adapters.py -v               # single file
+python -m pytest ai/tests/test_executor.py::TestExecutor         # single class
 ```
 
-### Front-End Demo UI
+### Web UI Server
 ```bash
 cd ln-ai-network
-python scripts/demo_ui_server.py   # serves web/ at http://127.0.0.1:8008
-# Override: DEMO_UI_HOST=0.0.0.0 DEMO_UI_PORT=9000 python scripts/demo_ui_server.py
+python scripts/ui_server.py   # serves web/ at http://127.0.0.1:8008 with SSE streaming
 ```
 
 ### Run Agent Offline (Mock Mode)
@@ -61,41 +60,85 @@ cd ln-ai-network
 python -m ai.agent   # runs against mock fixtures in ai/mocks/fixtures/
 ```
 
+### Run Pipeline Mode
+```bash
+cd ln-ai-network
+python -m ai.pipeline   # 4-stage pipeline: Translator → Planner → Executor → Summarizer
+```
+
 ## Architecture
 
-### Data Flow
+### Data Flow (Pipeline Mode — primary)
 ```
-User → inbox.jsonl → Agent (agent.py) → LLM Backend → tool_calls → MCP Server → bitcoin-cli / lightning-cli
-                                                                                       ↓
-User ← outbox.jsonl ← Agent ← structured intent JSON ←────────────────────── tool results
+User prompt → inbox.jsonl → PipelineCoordinator
+    │
+    ├─ 1. Translator  (LLM) → IntentBlock (goal, intent_type, context)
+    ├─ 2. Planner     (LLM) → ExecutionPlan (ordered PlanSteps with dependencies)
+    ├─ 3. Executor    (MCP) → StepResults (tool calls with results)
+    └─ 4. Summarizer  (LLM) → human-readable report
+    │
+    └→ outbox.jsonl → Web UI (SSE)
+```
+
+### Data Flow (Legacy Agent Mode)
+```
+User → inbox.jsonl → LightningAgent → ConversationController → LLM → tool_calls → MCP → bitcoin-cli / lightning-cli
+                                                                                            ↓
+User ← outbox.jsonl ← Agent ← structured intent JSON ←──────────────────────── tool results
 ```
 
 ### Core Components
 
-- **`ln-ai-network/ai/agent.py`** — Main agent controller. Reads from `runtime/agent/inbox.jsonl`, writes reports to `runtime/agent/outbox.jsonl`. Enforces deterministic safety policies (fail-fast on tool errors, oscillation detection, redundant recall blocking, tool-arg normalization). Build tag: `clean-single-agent-v5`.
+- **`ai/pipeline.py`** — PipelineCoordinator: top-level orchestrator for the 4-stage pipeline. Each stage uses a separate LLM backend instance (via `create_backend_for_role()`). Supports multi-turn history, goal verification, and SSE streaming.
 
-- **`ln-ai-network/mcp/ln_mcp_server.py`** — MCP server exposing 23 tools (bitcoin: `btc_*`, lightning: `ln_*`, health: `network_health`). All tools call `bitcoin-cli` or `lightning-cli` via subprocess. Listens on stdin (JSON-RPC).
+- **`ai/agent.py`** — Legacy single-agent mode. Thin process shell (~230 lines) that delegates to `ConversationController`. Build tag: `clean-single-agent-v5`.
 
-- **`ln-ai-network/ai/llm/`** — LLM backend abstraction. `factory.py` selects backend via `LLM_PROVIDER` env var (reads `LLM_PROVIDER` first, then legacy `LLM_BACKEND`). Adapters:
-  - `adapters/ollama_backend.py` — local Ollama (default; conforms to `LLMBackend` ABC)
-  - `adapters/openai_backend.py` — OpenAI API (known contract mismatch: `step()` takes raw dicts, not `LLMRequest`)
-  - `adapters/gemini_backend.py` — Google Gemini native SDK (uses `run_prompt()` path, not `step()`)
-  - Interface defined in `base.py` (`LLMBackend` ABC, `LLMRequest`, `LLMResponse`, error taxonomy)
+- **`ai/models.py`** — Shared data models: `IntentBlock` (Translator output), `ExecutionPlan`/`PlanStep` (Planner output), `StepResult` (Executor output), `PipelineResult` (full run record).
 
-- **`ln-ai-network/ai/core/`** — Shared utilities: `backoff.py` (exponential + circuit breaker), `rate_limiter.py` (RPM/TPM), `scheduler.py`, `token_estimation.py`, `config.py`, `concurrency.py`. Currently exist but are **not yet wired into `agent.py`**.
+- **`ai/tools.py`** — Centralized MCP tool registry, normalization, schema generation. Defines `READ_ONLY_TOOLS`, `STATE_CHANGING_TOOLS`, `TOOL_REQUIRED` arg specs, `_normalize_tool_args()`, `_is_tool_error()`, `_tool_sig()`, and `llm_tools_schema()`.
 
-- **`ln-ai-network/ai/command_queue.py`** — File-based JSONL queue with byte-offset tracking for deterministic reads.
+- **`ai/controllers/`** — Pipeline stage implementations:
+  - `translator.py` — NL prompt → IntentBlock via LLM
+  - `planner.py` — IntentBlock → ExecutionPlan via LLM
+  - `executor.py` — ExecutionPlan → StepResults via MCP tool calls (supports parallel execution with dependency ordering)
+  - `summarizer.py` — Tool results → human-readable answer via LLM
+  - `conversation.py` — Multi-turn LLM+MCP conversation loop (legacy agent mode)
+  - `shared.py` — Shared controller utilities
 
-- **`ln-ai-network/ai/mcp_client.py`** — `MCPClient` protocol + `FixtureMCPClient` (deterministic mock for tests) + `FastMCPClientWrapper`.
+- **`ai/llm/`** — LLM backend abstraction. All three adapters now conform to the `LLMBackend` ABC (`step(LLMRequest) → LLMResponse`):
+  - `base.py` — `LLMBackend` ABC, `LLMRequest`, `LLMResponse`, error taxonomy (`AuthError`, `RateLimitError`, `TransientAPIError`, `PermanentAPIError`)
+  - `factory.py` — `create_backend()` + `create_backend_for_role()` with lazy imports and per-stage model config
+  - `adapters/ollama_backend.py` — local Ollama (default)
+  - `adapters/openai_backend.py` — OpenAI API (+ streaming support)
+  - `adapters/gemini_backend.py` — Google Gemini (converts OpenAI format ↔ Gemini format)
+  - `guarded_backend.py` — Decorator adding rate limiting, exponential backoff, circuit breaker, and concurrency gating
 
-- **`ln-ai-network/scripts/demo_ui_server.py`** — stdlib Python HTTP server serving `web/` static files and bridging `/api/status`, `/api/health`, `/api/ask` to the agent's JSONL inbox/outbox.
+- **`ai/core/`** — Infrastructure utilities (now wired into the pipeline via `GuardedBackend`):
+  - `backoff.py` — Deterministic exponential backoff + circuit breaker
+  - `rate_limiter.py` — Dual RPM/TPM rate limiter
+  - `concurrency.py` — Concurrency gate (semaphore)
+  - `config.py` — `AgentConfig` (reads all config from env vars)
+  - `token_estimation.py` — Heuristic token counter
+  - `registry.py` — `AgentRegistry` for multi-agent coordination
+  - `scheduler.py` — Deterministic scheduler
 
-- **`ln-ai-network/web/`** — Front-end demo dashboard (vanilla HTML/CSS/JS). Polls `/api/status` for live agent state.
+- **`ai/mcp_client.py`** — `MCPClient` protocol + `FixtureMCPClient` (deterministic mock) + `FastMCPClientWrapper` (thread-safe with timeout via `MCPTimeoutError`).
+
+- **`ai/utils.py`** — `StartupLock`, `TraceLogger`, env helpers.
+
+- **`ai/command_queue.py`** — File-based JSONL queue with byte-offset tracking for deterministic reads.
+
+- **`mcp/ln_mcp_server.py`** — MCP server exposing tools (bitcoin: `btc_*`, lightning: `ln_*`, health: `network_health`). All tools call `bitcoin-cli` or `lightning-cli` via subprocess.
+
+- **`scripts/ui_server.py`** — Full pipeline dashboard web server with SSE streaming, network graph, trace log, and prompt input. Replaces the earlier `demo_ui_server.py`.
+
+- **`web/`** — Front-end dashboard (vanilla HTML/CSS/JS). Polls `/api/status` and receives SSE events for live pipeline state.
 
 ### Boot Sequence (scripts/startup/)
 1. `0.1.infra_boot.sh` — bitcoind + regtest chain
 2. `0.2.control_plane_boot.sh` — MCP server + agent control plane
 3. `0.3.agent_boot.sh` — AI agent process
+4. `0.4.ui_server.sh` — Web UI server
 
 Shutdown reverses this order via `scripts/shutdown/`.
 
@@ -104,10 +147,10 @@ Shutdown reverses this order via `scripts/shutdown/`.
 - **MCP boundary**: The AI agent never executes shell commands directly. All actions go through MCP tools. The agent reads via MCP and outputs structured intent JSON only.
 - **regtest only**: All Bitcoin/Lightning operations run on regtest. Never mainnet.
 - **Secrets in `.env`**: Real API keys go in `ln-ai-network/.env` (gitignored). Use `.env.example` as template. `env.sh` warns if key is missing or still placeholder.
-- **LLM provider toggle**: Set `LLM_PROVIDER=ollama` (default), `openai`, or `gemini` in `.env`. Gate all LLM usage with `ALLOW_LLM=1`. Legacy env var `LLM_BACKEND` is also accepted.
+- **LLM backend toggle**: Set `LLM_BACKEND=ollama` (default), `openai`, or `gemini` in `.env`. Per-stage override: `TRANSLATOR_LLM_BACKEND`, `PLANNER_LLM_BACKEND`, etc. Per-stage model override: `TRANSLATOR_OLLAMA_MODEL`, etc.
 - **Deterministic design**: Trace logging, byte-offset queue cursors, deterministic jitter (not random), signature-based dedup for tool calls.
-- **Fail-fast on tool errors**: If an MCP tool returns an error, the agent stops and emits `noop` rather than retrying blindly.
+- **Fail-fast on tool errors**: If an MCP tool returns an error, the executor marks the step as failed. Abort vs skip is controlled per-step via `on_error`.
 - **Runtime state is ephemeral**: The `runtime/` directory (blockchain data, node configs, agent logs) is gitignored and recreated by scripts.
-- **Mock fixtures**: Test without live infrastructure using JSON fixtures in `ai/mocks/fixtures/` (scenarios: `healthy.json`, `no_route.json`, `liquidity_starved.json`, `tool_failure.json`).
-- **Known issue — LLM interface contract**: `OpenAIBackend.step()` and `GeminiBackend.step()` do not conform to the `LLMBackend` ABC signature (`LLMRequest` → `LLMResponse`). Fixing this is a prerequisite for clean multi-model support (task J1–J4 in the team task list).
-- **CI**: GitHub Actions runs `pytest ai/tests/` on every push to `main` and on PRs. All tests in `ai/tests/` must pass without API keys or live infrastructure.
+- **Mock fixtures**: Test without live infrastructure using JSON fixtures in `ai/mocks/fixtures/`.
+- **CI**: GitHub Actions runs `pytest ai/tests/` on every push to `main` and on PRs. All tests must pass without API keys or live infrastructure.
+- **Commit directly to main**: This project commits directly to `main`. Do not create feature branches or PRs unless explicitly asked.
