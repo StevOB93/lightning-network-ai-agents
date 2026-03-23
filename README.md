@@ -1,14 +1,98 @@
-# Lightning Network AI Agent
+# Lightning Network AI Agents
 
-A prompt-driven AI agent that autonomously executes Lightning Network workflows on regtest. Type a plain-English instruction — the agent plans and runs every step via MCP tools.
+[![CI](https://github.com/StevOB93/lightning-network-ai-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/StevOB93/lightning-network-ai-agents/actions/workflows/ci.yml)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![Platform](https://img.shields.io/badge/platform-WSL%20%7C%20Linux-lightgrey)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-**The agent ONLY acts via MCP tools. No direct shell access.**
+A research harness that lets AI agents autonomously operate a Lightning Network using natural language. The system translates plain-English instructions into structured execution plans, runs them against real Bitcoin and Lightning nodes via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), and reports results back in human-readable form — all on a local regtest network with no real funds at risk.
+
+> **CSCI 499 — Senior Capstone Project, Texas A&M University–Commerce**
+
+---
+
+## Architecture
+
+The system is organized as a **five-layer stack** with a **four-stage AI pipeline** at its core:
+
+```mermaid
+graph TD
+    subgraph "User Interface"
+        UI[Web Dashboard<br/>HTML · JS · SSE]
+    end
+
+    subgraph "AI Pipeline"
+        T[1. Translator<br/>NL → IntentBlock]
+        P[2. Planner<br/>Intent → ExecutionPlan]
+        E[3. Executor<br/>Plan → MCP Tool Calls]
+        S[4. Summarizer<br/>Results → Human Answer]
+        T --> P --> E --> S
+    end
+
+    subgraph "LLM Backends"
+        OAI[OpenAI<br/>GPT-4o]
+        GEM[Gemini<br/>2.5 Flash]
+        OLL[Ollama<br/>Llama 3]
+    end
+
+    subgraph "Tool Layer — MCP Server"
+        MCP[23 MCP Tools<br/>btc_* · ln_* · network_health]
+    end
+
+    subgraph "Infrastructure"
+        BTC[Bitcoin Core<br/>regtest]
+        CLN1[CLN Node 1]
+        CLN2[CLN Node 2]
+        CLN3[CLN Node N]
+    end
+
+    UI -->|prompt| T
+    S -->|report| UI
+    T -.->|LLM| OAI
+    T -.->|LLM| GEM
+    T -.->|LLM| OLL
+    P -.->|LLM| OAI
+    S -.->|LLM| OAI
+    E -->|tool calls| MCP
+    MCP --> BTC
+    MCP --> CLN1
+    MCP --> CLN2
+    MCP --> CLN3
+```
+
+### Pipeline Stages
+
+| Stage | Input | Output | Uses LLM? |
+|-------|-------|--------|-----------|
+| **Translator** | Natural language prompt | `IntentBlock` — goal, intent type, context, success criteria | Yes |
+| **Planner** | `IntentBlock` | `ExecutionPlan` — ordered steps with dependencies and rationale | Yes |
+| **Executor** | `ExecutionPlan` | `StepResult[]` — MCP tool calls with results, retries, value chaining | No |
+| **Summarizer** | Tool results + original prompt | Human-readable answer with success/failure verdict | Yes |
+
+**Multi-turn context**: the last 4 exchanges are carried forward — follow-up prompts like *"now pay that invoice"* work naturally.
+
+**Goal verification**: after state-changing operations (payments, channel opens), a read-only MCP check confirms the action succeeded.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Blockchain | Bitcoin Core (regtest) |
+| Payment Network | Core Lightning (CLN) |
+| Tool Protocol | Model Context Protocol (MCP) — 23 tools |
+| AI Pipeline | Python 3.11+, 4-stage pipeline with per-stage LLM config |
+| LLM Backends | OpenAI (GPT-4o), Google Gemini (2.5 Flash), Ollama (Llama 3, local) |
+| Safety | GuardedBackend (rate limiting, exponential backoff, circuit breaker) |
+| Web UI | Vanilla HTML/CSS/JS, Server-Sent Events (SSE), D3.js network graph |
+| CI | GitHub Actions — pytest on every push |
 
 ---
 
 ## Quick Start
 
-### Step 1 — One-time setup (first time only)
+### 1. Install (one-time)
 
 ```bash
 ./install.sh
@@ -16,134 +100,37 @@ A prompt-driven AI agent that autonomously executes Lightning Network workflows 
 
 Installs Bitcoin Core, Core Lightning, Python venv, and all dependencies.
 
-### Step 2 — Configure your LLM
+### 2. Configure
 
 ```bash
 cp ln-ai-network/.env.example ln-ai-network/.env
 ```
 
-Edit `ln-ai-network/.env` and set your LLM key:
+Edit `ln-ai-network/.env` and set your LLM backend:
 
-| Backend | What to set |
-|---------|------------|
-| OpenAI (default) | `OPENAI_API_KEY=sk-...` and `ALLOW_LLM=1` |
-| Ollama (local, free) | `LLM_BACKEND=ollama` and `ALLOW_LLM=1` |
-| Gemini | `GEMINI_API_KEY=...` and `LLM_BACKEND=gemini` and `ALLOW_LLM=1` |
+| Backend | Configuration |
+|---------|--------------|
+| **OpenAI** (default) | `OPENAI_API_KEY=sk-...` |
+| **Ollama** (local, free) | `LLM_BACKEND=ollama` |
+| **Gemini** | `LLM_BACKEND=gemini` and `GEMINI_API_KEY=...` |
 
-### Step 3 — Start
+### 3. Start
 
 ```bash
 ./start.sh
 ```
 
-The system starts, and the **web UI opens automatically** at `http://127.0.0.1:8008`.
-
-### Step 4 — Stop
-
-```bash
-./stop.sh
-```
-
-Cleanly shuts down Bitcoin, Lightning, and the AI pipeline.
-
----
-
-## Using the Web UI
-
-The dashboard at `http://127.0.0.1:8008` is the main interface.
-
-Type any Lightning Network instruction into the prompt box and press **Enter** to submit (Shift+Enter for a newline):
-
-```
-Check the network health and tell me the status of all nodes.
-```
+The web UI opens automatically at **http://127.0.0.1:8008**. Type a prompt:
 
 ```
 Open a 500,000 sat channel from node 1 to node 2.
 ```
 
-```
-Have node 2 create an invoice for 10,000 msat, then pay it from node 1.
-```
-
-The dashboard shows live:
-- **Pipeline stage cards** — Translator → Intent, Planner → Steps, Executor → Results
-- **Network graph** — nodes and channels, auto-populated from tool results
-- **Live trace log** — real-time event stream
-- **Agent summary** — final answer from the agent
-
----
-
-## Architecture
-
-```
-Prompt → [Translator] → Intent → [Planner] → Plan → [Executor] → Results → [Summarizer] → Answer
-```
-
-| Stage | Does | Uses LLM? |
-|-------|------|-----------|
-| Translator | Text → structured IntentBlock (goal, intent, success criteria) | Yes |
-| Planner | IntentBlock → ordered tool steps with rationale | Yes |
-| Executor | Runs MCP tool calls, retries, value chaining | No |
-| Summarizer | Tool results → human-readable answer + success/failure verdict | Yes |
-
-**Multi-turn**: the last 4 exchanges are carried as context — follow-up prompts like "now pay that invoice" work naturally.
-
-**Goal verification**: after payment/channel operations, a read-only check confirms the action succeeded.
-
----
-
-## Running Tests
+### 4. Stop
 
 ```bash
-cd ln-ai-network
-source .venv/bin/activate
-python -m pytest ai/tests/ -v
+./stop.sh
 ```
-
----
-
-## Development Commands
-
-| Command | What it does |
-|---------|-------------|
-| `./start.sh` | Start the full system |
-| `./stop.sh` | Stop everything cleanly |
-| `./install.sh` | One-time install |
-| `./start.sh 3` | Start with 3 Lightning nodes |
-| `cd ln-ai-network && ./scripts/restart_agent.sh` | Restart just the AI pipeline (no infra restart) |
-| `cd ln-ai-network && ./scripts/restart_agent.sh fresh` | Restart with cleared inbox/outbox |
-
----
-
-## Logs
-
-| File | Contents |
-|------|---------|
-| `ln-ai-network/runtime/agent/trace.log` | Per-prompt trace (resets each request) |
-| `ln-ai-network/runtime/agent/outbox.jsonl` | Pipeline results (all history) |
-| `ln-ai-network/logs/system/0.3.agent_boot.log` | Pipeline process log |
-| `ln-ai-network/logs/system/0.4.ui_server.log` | Web UI server log |
-| `ln-ai-network/logs/system/shutdown.log` | Shutdown log |
-
----
-
-## Troubleshooting
-
-**Web UI doesn't open automatically**
-Navigate manually to `http://127.0.0.1:8008`. On WSL, ensure your Windows browser can reach localhost.
-
-**"OPENAI_API_KEY not set" error**
-Copy `.env.example` to `.env` and set a real API key, or switch to Ollama with `LLM_BACKEND=ollama`.
-
-**Agent not responding to prompts**
-Check `ln-ai-network/logs/system/0.3.agent_boot.log`. Ensure `ALLOW_LLM=1` is set in `.env`.
-
-**bitcoind / lightningd not found**
-Run `./install.sh` to install the required binaries.
-
-**Port conflicts**
-Override ports in `.env`: `BITCOIN_RPC_PORT`, `LIGHTNING_BASE_PORT`, `UI_PORT`.
 
 ---
 
@@ -151,15 +138,72 @@ Override ports in `.env`: `BITCOIN_RPC_PORT`, `LIGHTNING_BASE_PORT`, `UI_PORT`.
 
 ```
 lightning-network-ai-agents/
-├── start.sh            ← START HERE
-├── stop.sh             ← stop everything
-├── install.sh          ← one-time install
-└── ln-ai-network/
-    ├── ai/             # Pipeline: translator, planner, executor, summarizer, models
-    ├── mcp/            # MCP tool server (bitcoin-cli / lightning-cli boundary)
-    ├── scripts/        # Boot scripts, agent restart, UI server
-    │   └── ui_server.py
-    ├── web/            # Frontend (HTML, JS, CSS)
-    ├── .env.example    # Copy to .env and fill in secrets
-    └── runtime/        # Created at runtime (inbox, outbox, logs, locks)
+├── start.sh / stop.sh / install.sh     # Top-level launchers
+├── CLAUDE.md                            # Developer guide (Claude Code)
+├── docs/                                # Full documentation site
+│   ├── 0.Quickstart/                    #   Setup walkthrough
+│   ├── 1.Setup/                         #   Install & troubleshooting
+│   ├── 2.Architecture/                  #   System design deep-dive
+│   ├── 3.Components/                    #   MCP tools reference
+│   ├── 4.Runbooks/                      #   Operational procedures
+│   └── 5.Roadmap/                       #   Future work
+│
+└── ln-ai-network/                       # Main codebase
+    ├── ai/
+    │   ├── pipeline.py                  #   4-stage pipeline coordinator
+    │   ├── agent.py                     #   Legacy single-agent mode
+    │   ├── models.py                    #   IntentBlock, ExecutionPlan, StepResult
+    │   ├── tools.py                     #   MCP tool registry & normalization
+    │   ├── controllers/                 #   Translator, Planner, Executor, Summarizer
+    │   ├── llm/                         #   LLMBackend ABC + 3 adapters + GuardedBackend
+    │   ├── core/                        #   Backoff, rate limiter, config, scheduler
+    │   └── tests/                       #   200+ tests (no API keys required)
+    ├── mcp/                             #   MCP server (23 tools)
+    ├── scripts/                         #   Boot sequence, UI server
+    ├── web/                             #   Frontend dashboard
+    └── .env.example                     #   Environment template
 ```
+
+---
+
+## Running Tests
+
+```bash
+cd ln-ai-network
+python -m pytest ai/tests/ -v
+```
+
+All tests run without API keys or live infrastructure using mock fixtures.
+
+---
+
+## Documentation
+
+Detailed guides are in the [`docs/`](docs/) folder:
+
+| Section | Contents |
+|---------|----------|
+| [Quickstart](docs/0.Quickstart/) | Get the demo running in minutes |
+| [Setup](docs/1.Setup/) | Installation, configuration, troubleshooting |
+| [Architecture](docs/2.Architecture/) | System design, data flow, layer breakdown |
+| [Components](docs/3.Components/) | MCP tools reference, tool categories |
+| [Runbooks](docs/4.Runbooks/) | Start/stop procedures, debugging |
+| [Roadmap](docs/5.Roadmap/) | Future work and research directions |
+
+---
+
+## Team
+
+| Name | Role |
+|------|------|
+| **Stephan Beacham** | Project lead, infrastructure, documentation |
+| **Luke Thompson** | CI/CD, testing, integration |
+| **Joshua Kramer** | LLM backend contract, pipeline architecture |
+| **Tyler Pham** | Gemini backend, front-end UI |
+| **Caleb Lesher** | Documentation, research |
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

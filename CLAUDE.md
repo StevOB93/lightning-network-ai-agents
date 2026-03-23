@@ -147,7 +147,7 @@ Shutdown reverses this order via `scripts/shutdown/`.
 - **MCP boundary**: The AI agent never executes shell commands directly. All actions go through MCP tools. The agent reads via MCP and outputs structured intent JSON only.
 - **regtest only**: All Bitcoin/Lightning operations run on regtest. Never mainnet.
 - **Secrets in `.env`**: Real API keys go in `ln-ai-network/.env` (gitignored). Use `.env.example` as template. `env.sh` warns if key is missing or still placeholder.
-- **LLM backend toggle**: Set `LLM_BACKEND=ollama` (default), `openai`, or `gemini` in `.env`. Per-stage override: `TRANSLATOR_LLM_BACKEND`, `PLANNER_LLM_BACKEND`, etc. Per-stage model override: `TRANSLATOR_OLLAMA_MODEL`, etc.
+- **LLM backend toggle**: Set `LLM_BACKEND=openai` (default in `.env.example`), `ollama`, or `gemini`. Per-stage override: `TRANSLATOR_LLM_BACKEND`, `PLANNER_LLM_BACKEND`, etc. Per-stage model override: `TRANSLATOR_OLLAMA_MODEL`, etc.
 - **Deterministic design**: Trace logging, byte-offset queue cursors, deterministic jitter (not random), signature-based dedup for tool calls.
 - **Fail-fast on tool errors**: If an MCP tool returns an error, the executor marks the step as failed. Abort vs skip is controlled per-step via `on_error`.
 - **Runtime state is ephemeral**: The `runtime/` directory (blockchain data, node configs, agent logs) is gitignored and recreated by scripts.
