@@ -64,4 +64,10 @@ elif [[ "${_LLM_BACKEND}" == "openai" ]]; then
   elif [[ "${OPENAI_API_KEY}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
     echo "[env.sh] ERROR: OPENAI_API_KEY still placeholder. Set a real key in your local .env." >&2
   fi
+elif [[ "${_LLM_BACKEND}" == "claude" || "${_LLM_BACKEND}" == "anthropic" ]]; then
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    echo "[env.sh] ERROR: ANTHROPIC_API_KEY not set. Add it to your local .env file." >&2
+  elif [[ "${ANTHROPIC_API_KEY}" == "__REPLACE_WITH_REAL_KEY__" || "${ANTHROPIC_API_KEY}" == "__PASTE_YOUR_ANTHROPIC_KEY_HERE__" ]]; then
+    echo "[env.sh] ERROR: ANTHROPIC_API_KEY still placeholder. Paste your real key in .env." >&2
+  fi
 fi
