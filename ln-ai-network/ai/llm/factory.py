@@ -17,6 +17,7 @@ from __future__ import annotations
 #   {ROLE}_OLLAMA_MODEL  overrides OLLAMA_MODEL for that role
 #   {ROLE}_OPENAI_MODEL  overrides OPENAI_MODEL for that role
 #   {ROLE}_GEMINI_MODEL  overrides GEMINI_MODEL for that role
+#   {ROLE}_CLAUDE_MODEL  overrides CLAUDE_MODEL for that role
 #
 # Deferred imports:
 #   Adapter modules are imported only when selected. This means:
@@ -49,6 +50,7 @@ def create_backend():
       "ollama" / "local"   → OllamaBackend (local Ollama server)
       "openai"             → OpenAIBackend (requires OPENAI_API_KEY)
       "gemini"             → GeminiBackend (requires GEMINI_API_KEY)
+      "claude"             → ClaudeBackend (requires ANTHROPIC_API_KEY)
     """
     backend = (_env("LLM_BACKEND") or _env("AI_LLM_BACKEND") or "ollama").lower()
 
@@ -85,8 +87,20 @@ def create_backend():
             )
         return GeminiBackend()
 
+    if backend in ("claude", "claude_backend", "anthropic"):
+        try:
+            from ai.llm.adapters.claude_backend import ClaudeBackend  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "LLM_BACKEND=claude selected, but ClaudeBackend could not be imported. "
+                "Expected module: ai.llm.adapters.claude_backend (ClaudeBackend). "
+                f"Import error: {e.__class__.__name__}: {e}"
+            )
+        # ClaudeBackend enforces ANTHROPIC_API_KEY internally and raises AuthError if missing
+        return ClaudeBackend()
+
     raise RuntimeError(
-        f"Unknown LLM backend '{backend}'. Set LLM_BACKEND=ollama, openai, or gemini."
+        f"Unknown LLM backend '{backend}'. Set LLM_BACKEND=ollama, openai, gemini, or claude."
     )
 
 
@@ -152,7 +166,18 @@ def create_backend_for_role(role: str):
         model = _env(f"{role_upper}_GEMINI_MODEL") or _env("GEMINI_MODEL") or None
         return GeminiBackend(model=model)
 
+    if backend in ("claude", "claude_backend", "anthropic"):
+        try:
+            from ai.llm.adapters.claude_backend import ClaudeBackend  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                f"LLM backend for role '{role}' is claude, but ClaudeBackend could not be imported. "
+                f"Import error: {e.__class__.__name__}: {e}"
+            )
+        model = _env(f"{role_upper}_CLAUDE_MODEL") or _env("CLAUDE_MODEL") or None
+        return ClaudeBackend(model=model)
+
     raise RuntimeError(
         f"Unknown LLM backend '{backend}' for role '{role}'. "
-        "Set LLM_BACKEND=ollama, openai, or gemini."
+        "Set LLM_BACKEND=ollama, openai, gemini, or claude."
     )
