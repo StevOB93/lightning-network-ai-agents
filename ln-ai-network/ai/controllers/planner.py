@@ -106,6 +106,12 @@ Rules:
 - The default Bitcoin wallet is "miner". Use wallet_name="miner" for btc_wallet_ensure.
 - For diagnostics or status checks, use "network_health" — it returns node statuses and
   blockchain info in a single call. Do not call ln_node_status for each node separately.
+  network_health result fields: $stepN.result.payload.status ("ok"|"degraded"|"down"),
+  $stepN.result.payload.nodes (list), $stepN.result.payload.summary.nodes_running.
+- For diagnostic/health-check intents (phrases like "run a diagnostic", "run a test",
+  "check status", "check health"): use network_health (and optionally ln_listfunds) ONLY.
+  Do NOT include ln_connect or ln_openchannel unless the intent explicitly asks to connect
+  nodes or open channels.
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
 - To connect two nodes as peers (ln_connect): you MUST first ensure node 2 is running
   (ln_node_status → ln_node_start if needed), then call ln_getinfo(node=2) to get the
@@ -114,6 +120,18 @@ Rules:
   for same-machine). The port is payload.binding[0].port (NOT the node number). Minimal
   plan: ln_node_start(node=2) → ln_getinfo(node=2) → ln_connect(from_node=1,
   peer_id=$step2.result.payload.id, host="127.0.0.1", port=$step2.result.payload.binding[0].port).
+- CRITICAL: ln_connect.peer_id AND ln_openchannel.peer_id MUST both be the same
+  $stepN.result.payload.id placeholder from a preceding ln_getinfo step — NEVER a node
+  number (integer or short string like "2"). ln_node_status does NOT return a pubkey;
+  its result cannot be used as peer_id. The ONLY valid source for peer_id is the
+  ln_getinfo result's payload.id field. Full open-channel plan:
+  ln_node_start(node=2) → ln_getinfo(node=2) → ln_connect(from_node=1,
+  peer_id=$step2.result.payload.id, host="127.0.0.1", port=$step2.result.payload.binding[0].port)
+  → ln_openchannel(from_node=1, peer_id=$step2.result.payload.id, amount_sat=<amount>).
+- For payment flows: ln_invoice returns $stepN.result.payload.bolt11 (the BOLT11 invoice
+  string). ln_pay requires bolt11=$stepN.result.payload.bolt11. Full send-payment plan:
+  ln_invoice(node=<receiver>, amount_msat=<msat>, label="<unique>", description="<text>")
+  → ln_pay(from_node=<sender>, bolt11=$step1.result.payload.bolt11).
 - For cross-machine Lightning peer connectivity (user explicitly asks to make a node reachable
   FROM ANOTHER MACHINE / remote host / different computer): call sys_netinfo to get
   default_outbound_ip, then ln_node_stop + ln_node_start with bind_host="0.0.0.0" and
@@ -168,6 +186,22 @@ def _validate_plan_steps(steps: List[Dict[str, Any]]) -> Optional[str]:
         on_error = s.get("on_error", "abort")
         if on_error not in _VALID_ON_ERROR:
             return f"step {step_id}: invalid on_error '{on_error}'"
+
+        # ln_connect.peer_id and ln_openchannel.peer_id must be a $stepN placeholder
+        # or a valid hex pubkey — never a bare integer node number.
+        if tool in ("ln_connect", "ln_openchannel"):
+            peer_id = args.get("peer_id")
+            if isinstance(peer_id, int):
+                return (
+                    f"step {step_id}: {tool}.peer_id is an integer ({peer_id!r}). "
+                    "peer_id must be a pubkey hex string from ln_getinfo, e.g. "
+                    "$stepN.result.payload.id — never a node number."
+                )
+            if isinstance(peer_id, str) and not peer_id.startswith("$") and len(peer_id) < 20:
+                return (
+                    f"step {step_id}: {tool}.peer_id looks like a node number ({peer_id!r}), "
+                    "not a pubkey. Use ln_getinfo first and reference $stepN.result.payload.id."
+                )
 
     return None
 

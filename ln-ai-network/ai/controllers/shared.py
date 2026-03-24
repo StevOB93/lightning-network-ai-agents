@@ -21,15 +21,25 @@ from pathlib import Path
 
 
 def _env_int(name: str, default: int) -> int:
-    """Read an integer env var; return default if absent or blank."""
+    """Read an integer env var; return default if absent, blank, or non-numeric."""
     v = os.getenv(name)
-    return default if v is None or v.strip() == "" else int(v)
+    if v is None or v.strip() == "":
+        return default
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def _env_float(name: str, default: float) -> float:
-    """Read a float env var; return default if absent or blank."""
+    """Read a float env var; return default if absent, blank, or non-numeric."""
     v = os.getenv(name)
-    return default if v is None or v.strip() == "" else float(v)
+    if v is None or v.strip() == "":
+        return default
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def _get_node_count() -> int:

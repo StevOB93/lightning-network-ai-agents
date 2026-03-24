@@ -29,7 +29,10 @@ def _env_int(name: str, default: int) -> int:
     v = os.getenv(name)
     if v is None or v.strip() == "":
         return default
-    return int(v)
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
 
 
 @dataclass(frozen=True)
@@ -388,8 +391,14 @@ def ln_node_start(
     # WSL, and HDD-based environments. Override with env vars if needed:
     #   MCP_NODE_START_TIMEOUT_S  — max seconds to wait (default 30)
     #   MCP_NODE_POLL_INTERVAL_S  — seconds between status checks (default 0.5)
-    start_timeout_s  = float(os.environ.get("MCP_NODE_START_TIMEOUT_S")  or "30")
-    poll_interval_s  = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S")  or "0.5")
+    try:
+        start_timeout_s  = float(os.environ.get("MCP_NODE_START_TIMEOUT_S")  or "30")
+    except (ValueError, TypeError):
+        start_timeout_s  = 30.0
+    try:
+        poll_interval_s  = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S")  or "0.5")
+    except (ValueError, TypeError):
+        poll_interval_s  = 0.5
 
     deadline = time.time() + start_timeout_s
     last_reason = ""
@@ -415,8 +424,14 @@ def ln_node_stop(node: Union[int, str]) -> Dict[str, Any]:
     # often to poll. Uses MCP_NODE_POLL_INTERVAL_S shared with ln_node_start.
     # Override with MCP_NODE_STOP_TIMEOUT_S if your nodes take longer to shut down
     # (e.g. when flushing a large channel DB to disk on slow hardware).
-    stop_timeout_s  = float(os.environ.get("MCP_NODE_STOP_TIMEOUT_S")  or "30")
-    poll_interval_s = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S") or "0.5")
+    try:
+        stop_timeout_s  = float(os.environ.get("MCP_NODE_STOP_TIMEOUT_S")  or "30")
+    except (ValueError, TypeError):
+        stop_timeout_s  = 30.0
+    try:
+        poll_interval_s = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S") or "0.5")
+    except (ValueError, TypeError):
+        poll_interval_s = 0.5
 
     deadline = time.time() + stop_timeout_s
     while time.time() < deadline:
@@ -462,7 +477,7 @@ def ln_getinfo(node: Union[int, str]) -> Dict[str, Any]:
 
     err = str(gi.get("error") or "")
     if _looks_like_node_not_running(err):
-        return {"ok": True, "payload": {"node": nd.name, "running": False, "reason": err, "argv": gi.get("argv")}}
+        return {"ok": False, "error": f"Node {nd.name} is not running: {err}"}
     return gi
 
 
@@ -556,14 +571,17 @@ def network_health() -> Dict[str, Any]:
         status = "down"
 
     return {
-        "status": status,
-        "network": cfg.network,
-        "runtime_dir": str(cfg.runtime_dir),
-        "bitcoin_dir": str(cfg.bitcoin_dir),
-        "lightning_base": str(cfg.lightning_base),
-        "bitcoin": btc,
-        "nodes": nodes_out,
-        "summary": {"bitcoin_ok": bitcoin_ok, "nodes_total": len(node_dirs), "nodes_running": running_count},
+        "ok": True,
+        "payload": {
+            "status": status,
+            "network": cfg.network,
+            "runtime_dir": str(cfg.runtime_dir),
+            "bitcoin_dir": str(cfg.bitcoin_dir),
+            "lightning_base": str(cfg.lightning_base),
+            "bitcoin": btc,
+            "nodes": nodes_out,
+            "summary": {"bitcoin_ok": bitcoin_ok, "nodes_total": len(node_dirs), "nodes_running": running_count},
+        },
     }
 
 

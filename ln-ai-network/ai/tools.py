@@ -232,7 +232,7 @@ def _normalize_tool_args(tool: str, args: Any) -> Tuple[Dict[str, Any], Optional
     # Step 4d: Validate bolt11 basic format (Lightning invoice prefix)
     if "bolt11" in a and isinstance(a["bolt11"], str):
         b11 = a["bolt11"].lower()
-        if not (b11.startswith("lnbc") or b11.startswith("lnbcrt") or b11.startswith("lntb") or b11.startswith("ln")):
+        if not (b11.startswith("lnbcrt") or b11.startswith("lnbc") or b11.startswith("lntb")):
             return a, f"bolt11 does not look like a Lightning invoice: {a['bolt11'][:30]}...", changed
 
     # Step 5: Validate bitcoin addresses for regtest network

@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from ai.controllers.shared import _env_int
 from ai.mcp_client import MCPClient, MCPTimeoutError
 from ai.models import ExecutionPlan, PlanStep, StepResult
 from ai.tools import _is_tool_error, _normalize_tool_args, _summarize_tool_result
@@ -61,7 +62,7 @@ class ExecutorConfig:
     def from_env() -> ExecutorConfig:
         return ExecutorConfig(
             default_on_error=os.getenv("EXECUTOR_DEFAULT_ON_ERROR", "abort"),
-            max_workers=int(os.getenv("EXECUTOR_MAX_WORKERS", "1")),
+            max_workers=_env_int("EXECUTOR_MAX_WORKERS", 1),
         )
 
 
@@ -161,15 +162,26 @@ def _navigate(obj: Any, path: str) -> Any:
     Navigate a dot-separated path into a nested dict/list structure.
 
     Supports both dict key access and list index access (integer parts).
+    Accepts both dot notation (.0) and bracket notation ([0]) for list indices —
+    bracket notation is normalised to dot notation before processing so that
+    LLM-generated placeholder paths like "payload.binding[0].port" work the
+    same as "payload.binding.0.port".
+
     Raises KeyError with a descriptive message on any navigation failure
     so the caller can surface it as a placeholder resolution error.
 
-    Example:
+    Examples:
       _navigate({"result": {"payload": {"bolt11": "lnbc..."}}}, "result.payload.bolt11")
       → "lnbc..."
+      _navigate({"payload": {"binding": [{"port": 9735}]}}, "payload.binding[0].port")
+      → 9735
     """
+    # Normalise bracket notation: "binding[0].port" → "binding.0.port"
+    path = re.sub(r"\[(\d+)\]", r".\1", path)
     cur = obj
     for part in path.split("."):
+        if not part:
+            continue  # skip empty parts from leading/trailing dots
         if isinstance(cur, dict):
             if part not in cur:
                 raise KeyError(f"key '{part}' not found")
@@ -205,7 +217,9 @@ def _resolve_value(val: Any, results_by_id: Dict[int, StepResult], context: Opti
 
     # Check for $context.field first (more specific pattern)
     mc = _CONTEXT_RE.match(val)
-    if mc and context is not None:
+    if mc:
+        if context is None:
+            raise KeyError(f"placeholder '{val}' requires intent context but context is None")
         field = mc.group(1)
         if field in context:
             return context[field]
@@ -372,9 +386,12 @@ class Executor:
             # Sequential fast path — no thread overhead for single-step waves
             # or when parallelism is disabled.
             #
-            # results_by_id is updated after each step so that later steps in
-            # the same wave can reference earlier results via $stepN.path
-            # placeholders even without explicit depends_on declarations.
+            # Sequential mode: results_by_id is updated after each step so that
+            # later steps in the same wave can reference earlier results via
+            # $stepN.path placeholders even without explicit depends_on declarations.
+            # Parallel mode (max_workers>1): results_by_id is read-only within a wave;
+            # steps in the same wave cannot reference each other's outputs — use
+            # depends_on to force ordering if cross-step references are needed.
             # On an abort failure, execution stops early (same as pre-wave behavior).
             wave_results: List[StepResult] = []
             for step in wave:
@@ -530,6 +547,20 @@ class Executor:
                     "error": str(_mcp_timeout),
                 })
                 raw = {"error": str(_mcp_timeout)}
+            except Exception as _mcp_exc:
+                # Unexpected exception from the MCP client (e.g. subprocess crash,
+                # JSON decode error). Convert to an error dict so the on_error
+                # policy governs recovery rather than crashing the pipeline.
+                _exc_msg = f"MCP client error: {_mcp_exc.__class__.__name__}: {_mcp_exc}"
+                self.trace.log({
+                    "event": "tool_error",
+                    "stage": "executor",
+                    "req_id": req_id,
+                    "step_id": step.step_id,
+                    "tool": step.tool,
+                    "error": _exc_msg,
+                })
+                raw = {"error": _exc_msg}
             tool_err = _is_tool_error(raw)
 
             self.trace.log({

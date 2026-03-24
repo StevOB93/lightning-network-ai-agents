@@ -150,7 +150,7 @@ if [[ "${REINSTALL_PY_DEPS:-0}" == "1" ]]; then
 else
   echo "[SETUP] Skipping pip install (set REINSTALL_PY_DEPS=1 to force)."
 
-  if [[ "${LLM_PROVIDER:-openai}" == "ollama" ]]; then
+  if [[ "${LLM_BACKEND:-${LLM_PROVIDER:-openai}}" == "ollama" ]]; then
     if ! "$VENV_PY" -c "import requests" >/dev/null 2>&1; then
       echo "[SETUP] Missing Python module 'requests' (required for Ollama). Installing..."
       if ! install_requirements_if_present; then

@@ -130,12 +130,16 @@ class PlanStep:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> PlanStep:
+        try:
+            depends_on = [int(x) for x in d.get("depends_on", [])]
+        except (ValueError, TypeError):
+            depends_on = []
         return PlanStep(
-            step_id=int(d["step_id"]),
-            tool=str(d["tool"]),
+            step_id=int(d.get("step_id", 0)),
+            tool=str(d.get("tool", "")),
             args=dict(d.get("args", {})),
             expected_outcome=str(d.get("expected_outcome", "")),
-            depends_on=[int(x) for x in d.get("depends_on", [])],
+            depends_on=depends_on,
             on_error=str(d.get("on_error", "abort")),
             max_retries=int(d.get("max_retries", 0)),
         )
@@ -175,7 +179,7 @@ class ExecutionPlan:
         return ExecutionPlan(
             steps=[PlanStep.from_dict(s) for s in d.get("steps", [])],
             plan_rationale=str(d.get("plan_rationale", "")),
-            intent=IntentBlock.from_dict(d["intent"]),
+            intent=IntentBlock.from_dict(d.get("intent") or {}),
         )
 
 
@@ -229,8 +233,8 @@ class StepResult:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> StepResult:
         return StepResult(
-            step_id=int(d["step_id"]),
-            tool=str(d["tool"]),
+            step_id=int(d.get("step_id", 0)),
+            tool=str(d.get("tool", "")),
             args=dict(d.get("args", {})),
             ok=bool(d.get("ok", False)),
             error=d.get("error"),

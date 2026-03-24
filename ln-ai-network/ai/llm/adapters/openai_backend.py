@@ -119,6 +119,8 @@ class OpenAIBackend(LLMBackend):
                 raise TransientAPIError(msg) from e
             raise PermanentAPIError(msg) from e
 
+        if not response.choices:
+            raise TransientAPIError("OpenAI returned empty choices list")
         choice = response.choices[0]
 
         # Extract token usage if available (strongly recommended for rate limiting)

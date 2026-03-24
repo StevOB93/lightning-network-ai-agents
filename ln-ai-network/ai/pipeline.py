@@ -343,7 +343,8 @@ class PipelineCoordinator:
             self.trace.log({"event": "goal_verify", "req_id": req_id, "tool": tool, "ok": True})
             # Summarise: just confirm we got a non-error response with real data
             if isinstance(raw, dict):
-                payload = raw.get("result", raw).get("payload", {})
+                inner = raw.get("result", raw)
+                payload = inner.get("payload", {}) if isinstance(inner, dict) else {}
                 if isinstance(payload, dict):
                     keys = list(payload.keys())[:3]  # Show up to 3 keys as proof of data
                     return f"Verified via {tool}: {', '.join(keys) if keys else 'ok'}"
@@ -494,19 +495,24 @@ class PipelineCoordinator:
                     "error": str(_stream_err),
                 })
 
+            _token_write_failed = False
+
             def _on_token(text: str) -> None:
                 # Called for each token chunk yielded by the LLM during streaming.
                 # Each chunk is a separate JSONL line so the SSE endpoint can deliver
                 # them individually as they arrive (tail-and-emit pattern).
                 # Flush after every write so the OS buffer doesn't delay delivery.
+                nonlocal _token_write_failed
+                if _token_write_failed:
+                    return
                 try:
                     with stream_path.open("a", encoding="utf-8") as _sf:
                         _sf.write(json.dumps({"event": "token", "text": text}) + "\n")
                         _sf.flush()
                 except Exception as _token_err:
-                    # Log once per failing token rather than silently discarding.
-                    # Repeated failures (e.g. disk full) will appear in the trace
-                    # so the operator can diagnose without inspecting the stream file.
+                    # Log only the first failure — disk full or permissions errors
+                    # repeat for every token and would flood the trace log.
+                    _token_write_failed = True
                     self.trace.log({
                         "event": "stream_write_error",
                         "stage": "summarizer",
@@ -519,6 +525,7 @@ class PipelineCoordinator:
             except Exception as e:
                 # Summarizer failure is non-fatal — always fall back to the Translator's
                 # pre-computed human_summary. Log the exception so it's visible in the trace.
+                _token_write_failed = True  # suppress further token writes after the failure
                 self.trace.log({"event": "summarizer_error", "req_id": req_id, "error": str(e)})
                 summary = intent.human_summary
             finally:
@@ -603,7 +610,10 @@ class PipelineCoordinator:
                     self._reload_config()
 
                 for msg in read_new():
-                    req_id = int(msg.get("id", 0))
+                    try:
+                        req_id = int(msg.get("id", 0))
+                    except (ValueError, TypeError):
+                        req_id = 0
                     meta = msg.get("meta") or {}
                     kind = meta.get("kind")
 
@@ -647,7 +657,10 @@ class PipelineCoordinator:
                         # meta must include: target_kind, target_node, and
                         # the message to forward as meta.payload.
                         target_kind = meta.get("target_kind", "pipeline")
-                        target_node = int(meta.get("target_node", 1))
+                        try:
+                            target_node = int(meta.get("target_node", 1))
+                        except (ValueError, TypeError):
+                            target_node = 1
                         payload = meta.get("payload") or {}
                         ok = self._registry.route_to(target_kind, target_node, payload)
                         write_outbox({

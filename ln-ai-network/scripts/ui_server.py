@@ -870,7 +870,9 @@ class UIHandler(BaseHTTPRequestHandler):
         data: dict[str, Any] = {}
         if raw:
             try:
-                data = json.loads(raw)  # Prefer JSON body
+                parsed_body = json.loads(raw)  # Prefer JSON body
+                # Only accept a JSON object — lists/numbers/strings are invalid
+                data = parsed_body if isinstance(parsed_body, dict) else {}
             except Exception:
                 # Fallback: parse as application/x-www-form-urlencoded
                 # parse_qs returns lists; take the first value for each key

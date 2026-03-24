@@ -50,13 +50,15 @@ export LN_BIND_HOST="${LN_BIND_HOST:-127.0.0.1}"
 export LN_ANNOUNCE_HOST="${LN_ANNOUNCE_HOST:-$LN_BIND_HOST}"
 
 # Safety check: prevent running with placeholder key
-if [[ "${LLM_PROVIDER:-}" == "gemini" ]]; then
+# Support both LLM_BACKEND (current) and LLM_PROVIDER (legacy)
+_LLM_BACKEND="${LLM_BACKEND:-${LLM_PROVIDER:-}}"
+if [[ "${_LLM_BACKEND}" == "gemini" ]]; then
   if [[ -z "${GEMINI_API_KEY:-}" ]]; then
     echo "[env.sh] ERROR: GEMINI_API_KEY not set. Create .env from .env.example and set it." >&2
   elif [[ "${GEMINI_API_KEY}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
     echo "[env.sh] ERROR: GEMINI_API_KEY still placeholder. Set a real key in your local .env." >&2
   fi
-elif [[ "${LLM_PROVIDER:-}" == "openai" ]]; then
+elif [[ "${_LLM_BACKEND}" == "openai" ]]; then
   if [[ -z "${OPENAI_API_KEY:-}" ]]; then
     echo "[env.sh] ERROR: OPENAI_API_KEY not set. Create .env from .env.example and set it." >&2
   elif [[ "${OPENAI_API_KEY}" == "__REPLACE_WITH_REAL_KEY__" ]]; then
