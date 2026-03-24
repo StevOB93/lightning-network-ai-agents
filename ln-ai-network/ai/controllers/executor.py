@@ -228,6 +228,15 @@ def _resolve_value(val: Any, results_by_id: Dict[int, StepResult], context: Opti
     # Check for $stepN.path placeholder
     m = _PLACEHOLDER_RE.match(val)
     if not m:
+        # Catch any other $-prefixed string (e.g. "$1", "$agent.x") that looks
+        # like a placeholder but doesn't match a known pattern. Passing it through
+        # silently causes confusing downstream errors (e.g. int("$1") crashes).
+        if val.startswith("$"):
+            raise KeyError(
+                f"unrecognized placeholder '{val}' — "
+                f"use '$stepN.field.path' (e.g. '$step1.result.payload.id') "
+                f"or '$context.field'"
+            )
         return val  # Plain string, no substitution needed
 
     step_id = int(m.group(1))

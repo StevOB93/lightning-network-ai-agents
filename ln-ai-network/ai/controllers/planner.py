@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -96,8 +97,10 @@ Rules:
 - Use ONLY the tools listed below. Do not invent tool names.
 - All required args must be present. For args not yet known (e.g. a bolt11 from a prior step),
   use a placeholder like "$step1.result.payload.bolt11".
-- Do NOT invent placeholder names like "$agent.wallet". Only use "$stepN.path" placeholders
-  referencing actual prior step results, or literal values.
+- PLACEHOLDER FORMAT: always write "$stepN.field.path" — e.g. "$step1.result.payload.id".
+  NEVER use short forms like "$1" or "$2" (those are shell syntax, not valid here).
+  NEVER use "$context.field" unless the intent's context dict contains that field.
+  Do NOT invent placeholder names like "$agent.wallet".
 - Use "abort" for critical steps, "skip" for optional reads, "retry" only if retrying makes sense.
 - Produce the minimal set of steps — no extra reads unless necessary. Do NOT repeat the same
   tool call multiple times unless there is a clear reason.
@@ -186,6 +189,17 @@ def _validate_plan_steps(steps: List[Dict[str, Any]]) -> Optional[str]:
         on_error = s.get("on_error", "abort")
         if on_error not in _VALID_ON_ERROR:
             return f"step {step_id}: invalid on_error '{on_error}'"
+
+        # Reject shell-style short placeholders like "$1", "$2" — the correct
+        # format is "$step1.result.field". These pass silently through the
+        # executor's resolver and cause int() conversion crashes at the MCP layer.
+        for arg_key, arg_val in args.items():
+            if isinstance(arg_val, str) and re.match(r'^\$\d+$', arg_val):
+                return (
+                    f"step {step_id}: arg '{arg_key}' uses invalid placeholder "
+                    f"'{arg_val}'. Use '$step{{N}}.field.path' format, "
+                    f"e.g. '$step1.result.payload.id'."
+                )
 
         # ln_connect.peer_id and ln_openchannel.peer_id must be a $stepN placeholder
         # or a valid hex pubkey — never a bare integer node number.
