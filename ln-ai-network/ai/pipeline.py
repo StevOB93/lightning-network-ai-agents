@@ -715,7 +715,10 @@ class PipelineCoordinator:
             except Exception:
                 # Log the full traceback but keep running — transient errors
                 # (network blips, MCP timeouts) shouldn't kill the pipeline.
-                self._log("pipeline_error", {})
+                import io as _io
+                _tb = _io.StringIO()
+                traceback.print_exc(file=_tb)
+                self._log("pipeline_error", {"traceback": _tb.getvalue().strip()})
                 traceback.print_exc()
 
             # Drift-free sleep: targets the next absolute tick time so slow
