@@ -361,22 +361,22 @@ function renderPipelineResult(result) {
 const _seenTraceTs = new Set();
 
 /**
- * Append new trace events to the live trace log.
+ * Prepend new trace events to the live trace log (newest on top).
  *
  * Deduplication: each event gets a composite key "ts-kind" where kind is the
  * first available of: ev.kind, ev.event, or a JSON prefix of the whole object.
  * This handles events that share a timestamp (fast pipeline stages).
  *
- * Auto-scroll: if the user was at the bottom of the log before appending,
- * scroll to the new bottom. If they've scrolled up to read earlier events,
- * don't interrupt them by jumping to the bottom.
+ * Auto-scroll: if the user was at the top of the log (reading the latest events),
+ * keep them there after prepending. If they've scrolled down to read older events,
+ * don't interrupt them by jumping back to the top.
  */
 function renderTrace(events) {
   if (!events?.length) return;
 
   let appended = false;
-  // Check scroll position BEFORE appending to get accurate pre-append measurements
-  const wasAtBottom = traceLog.scrollHeight - traceLog.scrollTop <= traceLog.clientHeight + 40;
+  // Check scroll position BEFORE prepending
+  const wasAtTop = traceLog.scrollTop <= 40;
 
   // Clear the "No trace events yet." placeholder on first real event
   if (traceLog.querySelector(".empty-state")) {
@@ -402,11 +402,12 @@ function renderTrace(events) {
       return s === "{}" ? "" : truncate(s, 200);
     })();
     row.innerHTML = `<span class="trace-ts">${ts}</span><span class="trace-kind">${esc(kind)}</span>${detail ? `<span class="trace-detail">${esc(detail)}</span>` : ""}`;
-    traceLog.appendChild(row);
+    // Prepend so the newest event appears at the top
+    traceLog.insertBefore(row, traceLog.firstChild);
   }
 
-  if (appended && wasAtBottom) {
-    traceLog.scrollTop = traceLog.scrollHeight;
+  if (appended && wasAtTop) {
+    traceLog.scrollTop = 0;
   }
 }
 
