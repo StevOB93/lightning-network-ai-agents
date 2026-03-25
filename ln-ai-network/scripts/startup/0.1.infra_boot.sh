@@ -214,6 +214,25 @@ fi
 
 echo "[INFRA] node-1 ready."
 
+# ── FUND NODE-1 LIGHTNING WALLET ──────────────────────────────────────────────
+# infra_boot mines blocks to the Bitcoin Core wallet but leaves the Lightning
+# wallet empty. Fund it now so the agent can open channels immediately.
+echo "[INFRA] Funding node-1 Lightning wallet (10 BTC)..."
+NODE1_ADDR=$(lightning-cli --network=regtest --lightning-dir="$LIGHTNING_BASE/node-1" newaddr | jq -r '.bech32')
+MINER_ADDR=$(bitcoin-cli -regtest \
+  -rpcconnect=127.0.0.1 -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+  -rpcwallet="$WALLET_NAME" getnewaddress)
+bitcoin-cli -regtest \
+  -rpcconnect=127.0.0.1 -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+  -rpcwallet="$WALLET_NAME" sendtoaddress "$NODE1_ADDR" 10 >/dev/null
+bitcoin-cli -regtest \
+  -rpcconnect=127.0.0.1 -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
+  generatetoaddress 6 "$MINER_ADDR" >/dev/null
+echo "[INFRA] Node-1 Lightning wallet funded (10 BTC confirmed)."
+
 echo "[INFRA] Infrastructure ready."
 echo "[INFRA] Note: nodes 2..$NODE_COUNT are NOT started here."
 echo "[INFRA] The AI agent should start/stop nodes via MCP tools (ln_node_start/ln_node_stop)."

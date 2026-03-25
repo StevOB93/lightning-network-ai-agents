@@ -151,3 +151,96 @@ def test_empty_lines_skipped(history_path, cfg):
     )
     h = _HistoryHarness(history_path, cfg)
     assert len(h._history) == 2
+
+
+# =============================================================================
+# Tier-3 archive tests
+# =============================================================================
+
+class _ArchiveHarness:
+    """Minimal harness replicating the archive write logic from pipeline.py."""
+
+    def __init__(self, archive_path: Path) -> None:
+        self._archive_path = archive_path
+
+    def write_entry(
+        self,
+        user_text: str,
+        goal: str,
+        outcome: str = "ok",
+        human_summary: str = "",
+        ts: int = 1_000_000,
+    ) -> None:
+        record = json.dumps({
+            "ts": ts,
+            "user": user_text,
+            "goal": goal,
+            "outcome": outcome,
+            "summary": human_summary,
+        }, ensure_ascii=False)
+        with self._archive_path.open("a", encoding="utf-8") as fh:
+            fh.write(record + "\n")
+
+
+@pytest.fixture
+def archive_path(tmp_path):
+    return tmp_path / "archive.jsonl"
+
+
+def test_archive_write_creates_file(archive_path):
+    h = _ArchiveHarness(archive_path)
+    h.write_entry("start node 2", "Start node 2 and connect to node 1", outcome="ok", human_summary="Done.")
+    assert archive_path.exists()
+    lines = archive_path.read_text().strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["user"] == "start node 2"
+    assert record["goal"] == "Start node 2 and connect to node 1"
+    assert record["outcome"] == "ok"
+    assert record["summary"] == "Done."
+    assert "ts" in record
+
+
+def test_archive_never_trimmed(archive_path):
+    """Archive grows without bound — no max_history_messages cap."""
+    h = _ArchiveHarness(archive_path)
+    for i in range(20):
+        h.write_entry(f"prompt {i}", f"goal {i}", outcome="ok")
+    lines = archive_path.read_text().strip().splitlines()
+    assert len(lines) == 20  # all 20 entries present
+
+
+def test_archive_multiple_outcomes(archive_path):
+    h = _ArchiveHarness(archive_path)
+    h.write_entry("pay invoice", "Send 10000 sats", outcome="ok")
+    h.write_entry("bad command", "Unknown intent", outcome="failed")
+    h.write_entry("open channel", "Open channel node1→node2", outcome="partial")
+
+    records = [json.loads(l) for l in archive_path.read_text().strip().splitlines()]
+    assert [r["outcome"] for r in records] == ["ok", "failed", "partial"]
+
+
+def test_memory_lookup_filtering(archive_path):
+    """Simulate memory_lookup filtering logic (keyword + outcome)."""
+    h = _ArchiveHarness(archive_path)
+    h.write_entry("run payment demo", "Open channel and pay invoice", outcome="ok", ts=1_000)
+    h.write_entry("run diagnostic test", "Network health check", outcome="ok", ts=2_000)
+    h.write_entry("run payment demo", "Open channel and pay invoice", outcome="failed", ts=3_000)
+
+    # Read all entries (simulates memory_lookup internals)
+    entries = [json.loads(l) for l in archive_path.read_text().strip().splitlines()]
+
+    # Filter by keyword "payment"
+    filtered = [e for e in entries if "payment" in e["user"].lower() or "payment" in e["goal"].lower()]
+    assert len(filtered) == 2
+
+    # Filter by outcome "failed"
+    failed = [e for e in entries if e["outcome"] == "failed"]
+    assert len(failed) == 1
+    assert failed[0]["user"] == "run payment demo"
+    assert failed[0]["ts"] == 3_000
+
+    # last_n=2 of all entries
+    last2 = entries[-2:]
+    assert last2[0]["ts"] == 2_000
+    assert last2[1]["ts"] == 3_000

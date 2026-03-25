@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -45,19 +46,19 @@ class PlannerConfig:
     """
     Immutable configuration for the Planner LLM call.
 
-    max_output_tokens: 1024 is generous for multi-step plans (typically
-      3-6 steps). Larger plans may be a sign the LLM is adding unnecessary steps.
+    max_output_tokens: 2048 supports up to ~10-step plans including the full
+      node-start → connect → channel-open → mine-blocks → invoice → pay sequence.
     temperature: Very low (0.1) — planning requires precise, deterministic JSON.
     max_retries: Up to 2 additional self-correction attempts after first failure.
     """
-    max_output_tokens: int = 1024
+    max_output_tokens: int = 2048
     temperature: float = 0.1
     max_retries: int = 2
 
     @staticmethod
     def from_env() -> PlannerConfig:
         return PlannerConfig(
-            max_output_tokens=_env_int("PLANNER_MAX_OUTPUT_TOKENS", 1024),
+            max_output_tokens=_env_int("PLANNER_MAX_OUTPUT_TOKENS", 2048),
             temperature=_env_float("PLANNER_TEMPERATURE", 0.1),
             max_retries=_env_int("PLANNER_MAX_RETRIES", 2),
         )
@@ -96,16 +97,36 @@ Rules:
 - Use ONLY the tools listed below. Do not invent tool names.
 - All required args must be present. For args not yet known (e.g. a bolt11 from a prior step),
   use a placeholder like "$step1.result.payload.bolt11".
-- Do NOT invent placeholder names like "$agent.wallet". Only use "$stepN.path" placeholders
-  referencing actual prior step results, or literal values.
+- PLACEHOLDER FORMAT: always write "$stepN.field.path" — e.g. "$step1.result.payload.id".
+  NEVER use short forms like "$1" or "$2" (those are shell syntax, not valid here).
+  NEVER use "$context.field" unless the intent's context dict contains that field.
+  Do NOT invent placeholder names like "$agent.wallet".
 - Use "abort" for critical steps, "skip" for optional reads, "retry" only if retrying makes sense.
 - Produce the minimal set of steps — no extra reads unless necessary. Do NOT repeat the same
   tool call multiple times unless there is a clear reason.
 - If the intent is "noop" or has no clear tool path, return "steps": [].
 - Available nodes in this regtest environment: 1 through {node_count}. Do NOT use node numbers outside this range.
-- The default Bitcoin wallet is "miner". Use wallet_name="miner" for btc_wallet_ensure.
+- The default Bitcoin wallet is "shared-wallet". Use wallet_name="shared-wallet" for btc_wallet_ensure.
 - For diagnostics or status checks, use "network_health" — it returns node statuses and
   blockchain info in a single call. Do not call ln_node_status for each node separately.
+  network_health result fields: $stepN.result.payload.status ("ok"|"degraded"|"down"),
+  $stepN.result.payload.nodes (list), $stepN.result.payload.summary.nodes_running.
+- CRITICAL: For diagnostic/health-check intents (goal contains phrases like "run a
+  diagnostic", "run a test", "check status", "check health", "health check"): use
+  network_health as step 1, then OPTIONALLY ln_listfunds for node 1 ONLY — even if
+  success_criteria list "channel_opened" or "payment_sent". Those criteria are translator
+  artifacts; ignore them. Do NOT call ln_listfunds, ln_listpeers, or any tool on node 2
+  in a diagnostic plan unless the goal explicitly says to check node 2. Do NOT include
+  ln_connect, ln_openchannel, ln_invoice, or ln_pay. Minimal valid diagnostic plan:
+    network_health (on_error: "abort") → ln_listfunds(node=1, on_error: "skip")
+- For all read-only diagnostic steps (ln_listfunds, ln_listpeers, ln_getinfo called for
+  information only): use on_error: "skip" so the diagnostic completes even when a node
+  is offline. Reserve on_error: "abort" for critical state-changing steps.
+- CRITICAL: For recall intents (intent_type == "recall" OR goal contains phrases like
+  "what did I run", "last run", "recent history", "what happened before", "past operations"):
+  use memory_lookup ONLY. Args: query (keyword from user's prompt, optional), last_n
+  (default 5). Do NOT include any Bitcoin or Lightning tools. Minimal recall plan:
+    memory_lookup(query="<keyword>", last_n=5, on_error: "abort")
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
 - To connect two nodes as peers (ln_connect): you MUST first ensure node 2 is running
   (ln_node_status → ln_node_start if needed), then call ln_getinfo(node=2) to get the
@@ -114,6 +135,27 @@ Rules:
   for same-machine). The port is payload.binding[0].port (NOT the node number). Minimal
   plan: ln_node_start(node=2) → ln_getinfo(node=2) → ln_connect(from_node=1,
   peer_id=$step2.result.payload.id, host="127.0.0.1", port=$step2.result.payload.binding[0].port).
+- CRITICAL: ln_connect.peer_id AND ln_openchannel.peer_id MUST both be the same
+  $stepN.result.payload.id placeholder from a preceding ln_getinfo step — NEVER a node
+  number (integer or short string like "2"). ln_node_status does NOT return a pubkey;
+  its result cannot be used as peer_id. The ONLY valid source for peer_id is the
+  ln_getinfo result's payload.id field. Full open-channel plan:
+  ln_node_start(node=2) → ln_getinfo(node=2) → ln_connect(from_node=1,
+  peer_id=$step2.result.payload.id, host="127.0.0.1", port=$step2.result.payload.binding[0].port)
+  → ln_openchannel(from_node=1, peer_id=$step2.result.payload.id, amount_sat=<amount>).
+- After ln_openchannel, the funding tx must be confirmed before payments work. Always add
+  these two mining steps immediately after ln_openchannel (let N = step_id of ln_openchannel,
+  M = step_id of btc_getnewaddress):
+    btc_getnewaddress: args={{}}, depends_on=[N]
+    btc_generatetoaddress: args={{"blocks": 6, "address": "$stepM.result.payload"}}, depends_on=[M]
+  ln_invoice and ln_pay must have depends_on that includes the btc_generatetoaddress step_id.
+- All JSON values must be valid JSON literals. NEVER write arithmetic expressions such as
+  "amount_msat": 10000 * 1000. Compute values yourself before writing them:
+  if amount_sat=10000 then write "amount_msat": 10000000 (multiply by 1000 mentally).
+- For payment flows: ln_invoice returns $stepN.result.payload.bolt11 (the BOLT11 invoice
+  string). ln_pay requires bolt11=$stepN.result.payload.bolt11. Full send-payment plan:
+  ln_invoice(node=<receiver>, amount_msat=<msat>, label="<unique>", description="<text>")
+  → ln_pay(from_node=<sender>, bolt11=$step1.result.payload.bolt11).
 - For cross-machine Lightning peer connectivity (user explicitly asks to make a node reachable
   FROM ANOTHER MACHINE / remote host / different computer): call sys_netinfo to get
   default_outbound_ip, then ln_node_stop + ln_node_start with bind_host="0.0.0.0" and
@@ -168,6 +210,33 @@ def _validate_plan_steps(steps: List[Dict[str, Any]]) -> Optional[str]:
         on_error = s.get("on_error", "abort")
         if on_error not in _VALID_ON_ERROR:
             return f"step {step_id}: invalid on_error '{on_error}'"
+
+        # Reject shell-style short placeholders like "$1", "$2" — the correct
+        # format is "$step1.result.field". These pass silently through the
+        # executor's resolver and cause int() conversion crashes at the MCP layer.
+        for arg_key, arg_val in args.items():
+            if isinstance(arg_val, str) and re.match(r'^\$\d+$', arg_val):
+                return (
+                    f"step {step_id}: arg '{arg_key}' uses invalid placeholder "
+                    f"'{arg_val}'. Use '$step{{N}}.field.path' format, "
+                    f"e.g. '$step1.result.payload.id'."
+                )
+
+        # ln_connect.peer_id and ln_openchannel.peer_id must be a $stepN placeholder
+        # or a valid hex pubkey — never a bare integer node number.
+        if tool in ("ln_connect", "ln_openchannel"):
+            peer_id = args.get("peer_id")
+            if isinstance(peer_id, int):
+                return (
+                    f"step {step_id}: {tool}.peer_id is an integer ({peer_id!r}). "
+                    "peer_id must be a pubkey hex string from ln_getinfo, e.g. "
+                    "$stepN.result.payload.id — never a node number."
+                )
+            if isinstance(peer_id, str) and not peer_id.startswith("$") and len(peer_id) < 20:
+                return (
+                    f"step {step_id}: {tool}.peer_id looks like a node number ({peer_id!r}), "
+                    "not a pubkey. Use ln_getinfo first and reference $stepN.result.payload.id."
+                )
 
     return None
 

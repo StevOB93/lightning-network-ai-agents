@@ -33,15 +33,25 @@ from dataclasses import dataclass
 
 
 def _env_int(name: str, default: int) -> int:
-    """Read an integer env var; return default if absent or blank."""
+    """Read an integer env var; return default if absent, blank, or non-numeric."""
     v = os.getenv(name)
-    return default if v is None or v.strip() == "" else int(v)
+    if v is None or v.strip() == "":
+        return default
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def _env_float(name: str, default: float) -> float:
-    """Read a float env var; return default if absent or blank."""
+    """Read a float env var; return default if absent, blank, or non-numeric."""
     v = os.getenv(name)
-    return default if v is None or v.strip() == "" else float(v)
+    if v is None or v.strip() == "":
+        return default
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
 
 
 @dataclass(frozen=True)
@@ -86,7 +96,7 @@ class AgentConfig:
     # ── Prompt growth control ─────────────────────────────────────────────────
     # Bound context window usage. max_history_messages is a sliding window;
     # max_tool_output_chars truncates tool output before injecting into history.
-    max_history_messages: int = 40
+    max_history_messages: int = 6
     max_tool_output_chars: int = 8_000
 
     # ── Backoff policy ────────────────────────────────────────────────────────
@@ -119,7 +129,7 @@ class AgentConfig:
             llm_tpm=_env_int("LLM_TPM", 60_000),
             llm_temperature=_env_float("LLM_TEMPERATURE", 0.2),
             llm_max_output_tokens=_env_int("LLM_MAX_OUTPUT_TOKENS", 512),
-            max_history_messages=_env_int("LLM_MAX_HISTORY_MESSAGES", 40),
+            max_history_messages=_env_int("LLM_MAX_HISTORY_MESSAGES", 6),
             max_tool_output_chars=_env_int("LLM_MAX_TOOL_OUTPUT_CHARS", 8_000),
             backoff_base_ms=_env_int("LLM_BACKOFF_BASE_MS", 1000),
             backoff_max_ms=_env_int("LLM_BACKOFF_MAX_MS", 30_000),

@@ -21,15 +21,25 @@ from pathlib import Path
 
 
 def _env_int(name: str, default: int) -> int:
-    """Read an integer env var; return default if absent or blank."""
+    """Read an integer env var; return default if absent, blank, or non-numeric."""
     v = os.getenv(name)
-    return default if v is None or v.strip() == "" else int(v)
+    if v is None or v.strip() == "":
+        return default
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def _env_float(name: str, default: float) -> float:
-    """Read a float env var; return default if absent or blank."""
+    """Read a float env var; return default if absent, blank, or non-numeric."""
     v = os.getenv(name)
-    return default if v is None or v.strip() == "" else float(v)
+    if v is None or v.strip() == "":
+        return default
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def _get_node_count() -> int:
@@ -101,11 +111,12 @@ def _repair_json(text: str) -> str:
     Transformations applied in order:
       1. Strip // single-line comments (not valid JSON)
       2. Strip /* multi-line */ comments (not valid JSON)
-      3. Remove trailing commas before } or ] (Python allows, JSON doesn't)
-      4. Replace single-quoted strings with double-quoted (Python style → JSON)
-      5. Add missing commas between adjacent string values on separate lines
-      6. Add missing commas between adjacent object fields
-      7. Truncate any trailing garbage after the final closing brace
+      3. Evaluate arithmetic expressions in numeric values (e.g. 10000 * 1000 → 10000000)
+      4. Remove trailing commas before } or ] (Python allows, JSON doesn't)
+      5. Replace single-quoted strings with double-quoted (Python style → JSON)
+      6. Add missing commas between adjacent string values on separate lines
+      7. Add missing commas between adjacent object fields
+      8. Truncate any trailing garbage after the final closing brace
 
     This is intentionally permissive — parsing something slightly malformed is
     better than failing the whole request and burning another LLM call.
@@ -114,10 +125,30 @@ def _repair_json(text: str) -> str:
     text = re.sub(r'//[^\n]*', '', text)
     # Strip multi-line comments (/* ... */)
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    # Evaluate arithmetic expressions that LLMs sometimes write as JSON values
+    # (e.g. "amount_msat": 10000 * 1000 → "amount_msat": 10000000).
+    # Only applied to integer * integer, + integer, etc. — not inside strings.
+    def _eval_arith(m: re.Match) -> str:
+        try:
+            a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+            if op == '*':   return str(a * b)
+            if op == '+':   return str(a + b)
+            if op == '-':   return str(a - b)
+            if op == '/' and b != 0: return str(a // b)
+        except Exception:
+            pass
+        return m.group(0)
+    text = re.sub(r'\b(\d+)\s*([*+\-/])\s*(\d+)\b', _eval_arith, text)
     # Remove trailing commas before } or ]
     text = re.sub(r',\s*([}\]])', r'\1', text)
-    # Replace single quotes with double quotes (simple cases only)
-    text = re.sub(r"(?<![\"\\])'([^']*)'", r'"\1"', text)
+    # Replace single quotes with double quotes — but only when the closing quote
+    # is followed by a JSON structural character (`,` `}` `]` or whitespace then
+    # one of those). This prevents replacing embedded natural-language apostrophes
+    # or quotes inside an already-valid double-quoted JSON string such as:
+    #   "expected_outcome": "status is 'ok' and nodes are running"
+    # Without the lookahead that `'ok'` would become `"ok"`, injecting an
+    # unescaped double-quote into the middle of the string and breaking JSON.
+    text = re.sub(r"(?<![\"\\])'([^']*)'(?=\s*[,\}\]])", r'"\1"', text)
     # Fix missing commas between adjacent string values (array elements or object values).
     # Uses \s+ (not \s*\n) so it catches both newline-separated and same-line cases,
     # e.g. "foo" "bar" or "foo"\n"bar" → "foo",\n"bar"

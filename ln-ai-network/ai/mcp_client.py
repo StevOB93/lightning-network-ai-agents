@@ -97,12 +97,24 @@ class FixtureMCPClient:
             return data["network_health"]
 
         if tool == "ln_getinfo":
-            node = int(args["node"])
-            return data["ln_getinfo"][str(node)]
+            node_raw = args.get("node")
+            if node_raw is None:
+                return {"error": "Missing required arg 'node'", "tool": tool}
+            try:
+                node_key = str(int(node_raw))
+            except (ValueError, TypeError):
+                return {"error": f"Invalid node value: {node_raw!r}", "tool": tool}
+            return data["ln_getinfo"].get(node_key, {"error": f"No fixture for node {node_key}", "tool": tool})
 
         if tool == "ln_listfunds":
-            node = int(args["node"])
-            return data["ln_listfunds"][str(node)]
+            node_raw = args.get("node")
+            if node_raw is None:
+                return {"error": "Missing required arg 'node'", "tool": tool}
+            try:
+                node_key = str(int(node_raw))
+            except (ValueError, TypeError):
+                return {"error": f"Invalid node value: {node_raw!r}", "tool": tool}
+            return data["ln_listfunds"].get(node_key, {"error": f"No fixture for node {node_key}", "tool": tool})
 
         # Unknown tool: return an error dict in the standard MCP error shape
         return {"error": f"Unknown tool '{tool}'", "tool": tool, "args": args}
@@ -148,7 +160,10 @@ class FastMCPClientWrapper:
         # Read once at startup — changing it requires a restart.
         # Default: 30s covers slow regtest operations (channel opens, etc.)
         # without letting a truly hung server freeze the pipeline indefinitely.
-        self._timeout_s = float(os.getenv("MCP_CALL_TIMEOUT_S") or "30")
+        try:
+            self._timeout_s = float(os.getenv("MCP_CALL_TIMEOUT_S") or "30")
+        except (ValueError, TypeError):
+            self._timeout_s = 30.0
 
         # Single-worker executor that runs the actual tool call in a background
         # thread. We submit the call to this executor and use future.result(timeout=N)

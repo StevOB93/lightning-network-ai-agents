@@ -57,7 +57,19 @@ class FastMCPClient:
                 stderr = self.process.stderr.read()
             raise RuntimeError(f"No response from MCP server. STDERR: {stderr}")
 
-        return json.loads(response_line)
+        try:
+            return json.loads(response_line)
+        except json.JSONDecodeError as e:
+            stderr = ""
+            if self.process.stderr:
+                try:
+                    stderr = self.process.stderr.read()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"MCP server returned non-JSON: {response_line.strip()[:120]!r}. "
+                f"STDERR: {stderr[:300]}"
+            ) from e
 
     def close(self) -> None:
         try:

@@ -138,6 +138,11 @@ class PipelineCoordinator:
         # Each line is a JSON {"role": ..., "content": ...} message.
         self._history_path = _runtime_agent_dir() / "history.jsonl"
 
+        # Tier-3 episodic archive — append-only record of every completed run.
+        # Never trimmed automatically; only wiped on `restart_agent.sh fresh`.
+        # NOT injected into LLM context — only queried on demand via memory_lookup.
+        self._archive_path = _runtime_agent_dir() / "archive.jsonl"
+
         # Rolling conversation history: list of {"role": "user"|"assistant", "content": str}
         # Injected into the Translator's messages so follow-up queries have context.
         # Loaded from disk on startup so context is preserved across restarts.
@@ -241,7 +246,13 @@ class PipelineCoordinator:
         """Serialize and append the pipeline result to the outbox JSONL file."""
         write_outbox(result.to_outbox_dict())
 
-    def _update_history(self, user_text: str, assistant_summary: str) -> None:
+    def _update_history(
+        self,
+        user_text: str,
+        assistant_summary: str,
+        outcome: str = "ok",
+        human_summary: str = "",
+    ) -> None:
         """
         Append the latest exchange to the rolling history buffer and trim to
         cfg.max_history_messages pairs.
@@ -249,7 +260,19 @@ class PipelineCoordinator:
         We store the intent's goal string (not the full verbose summary) as the
         assistant turn. This keeps the history compact and avoids injecting raw
         tool output JSON into subsequent prompts.
+
+        Also appends one record to the tier-3 episodic archive (archive.jsonl)
+        which is never trimmed and only queried on demand via memory_lookup.
         """
+        # Deduplicate: if the last exchange in history is identical (same user text
+        # AND same assistant goal), skip — repeated identical prompts (e.g. 10x demo
+        # runs of the same command) would otherwise dominate the context window and
+        # cause the translator to drift toward that old intent on unrelated prompts.
+        if (len(self._history) >= 2
+                and self._history[-2].get("content") == user_text
+                and self._history[-1].get("content") == assistant_summary):
+            return  # identical to last entry — no new information
+
         new_msgs = [
             {"role": "user",      "content": user_text},
             {"role": "assistant", "content": assistant_summary},
@@ -278,6 +301,29 @@ class PipelineCoordinator:
                         _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
         except Exception:
             pass  # History is advisory — a write failure never crashes the pipeline
+
+        # Tier-3: append one record to the episodic archive (best-effort).
+        # This file is never trimmed — it grows as a permanent audit log.
+        try:
+            archive_record = json.dumps({
+                "ts": int(time.time()),
+                "user": user_text,
+                "goal": assistant_summary,
+                "outcome": outcome,
+                "summary": human_summary,
+            }, ensure_ascii=False)
+            with self._archive_path.open("a", encoding="utf-8") as fh:
+                if _fcntl is not None:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                try:
+                    fh.write(archive_record + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    if _fcntl is not None:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+        except Exception:
+            pass  # Archive write failure is non-fatal
 
     def _handle_sighup(self, signum: int, frame: Any) -> None:
         """Mark config reload as pending (processed safely in the run loop)."""
@@ -343,7 +389,8 @@ class PipelineCoordinator:
             self.trace.log({"event": "goal_verify", "req_id": req_id, "tool": tool, "ok": True})
             # Summarise: just confirm we got a non-error response with real data
             if isinstance(raw, dict):
-                payload = raw.get("result", raw).get("payload", {})
+                inner = raw.get("result", raw)
+                payload = inner.get("payload", {}) if isinstance(inner, dict) else {}
                 if isinstance(payload, dict):
                     keys = list(payload.keys())[:3]  # Show up to 3 keys as proof of data
                     return f"Verified via {tool}: {', '.join(keys) if keys else 'ok'}"
@@ -494,19 +541,24 @@ class PipelineCoordinator:
                     "error": str(_stream_err),
                 })
 
+            _token_write_failed = False
+
             def _on_token(text: str) -> None:
                 # Called for each token chunk yielded by the LLM during streaming.
                 # Each chunk is a separate JSONL line so the SSE endpoint can deliver
                 # them individually as they arrive (tail-and-emit pattern).
                 # Flush after every write so the OS buffer doesn't delay delivery.
+                nonlocal _token_write_failed
+                if _token_write_failed:
+                    return
                 try:
                     with stream_path.open("a", encoding="utf-8") as _sf:
                         _sf.write(json.dumps({"event": "token", "text": text}) + "\n")
                         _sf.flush()
                 except Exception as _token_err:
-                    # Log once per failing token rather than silently discarding.
-                    # Repeated failures (e.g. disk full) will appear in the trace
-                    # so the operator can diagnose without inspecting the stream file.
+                    # Log only the first failure — disk full or permissions errors
+                    # repeat for every token and would flood the trace log.
+                    _token_write_failed = True
                     self.trace.log({
                         "event": "stream_write_error",
                         "stage": "summarizer",
@@ -519,6 +571,7 @@ class PipelineCoordinator:
             except Exception as e:
                 # Summarizer failure is non-fatal — always fall back to the Translator's
                 # pre-computed human_summary. Log the exception so it's visible in the trace.
+                _token_write_failed = True  # suppress further token writes after the failure
                 self.trace.log({"event": "summarizer_error", "req_id": req_id, "error": str(e)})
                 summary = intent.human_summary
             finally:
@@ -603,7 +656,10 @@ class PipelineCoordinator:
                     self._reload_config()
 
                 for msg in read_new():
-                    req_id = int(msg.get("id", 0))
+                    try:
+                        req_id = int(msg.get("id", 0))
+                    except (ValueError, TypeError):
+                        req_id = 0
                     meta = msg.get("meta") or {}
                     kind = meta.get("kind")
 
@@ -636,10 +692,16 @@ class PipelineCoordinator:
                         self.trace.archive(req_id, start_ts, arch_status)
 
                         # Update rolling history so the next prompt has context.
-                        # Store the intent's goal (concise) not the verbose summary
-                        # (which may contain raw JSON from tool results).
-                        history_summary = result.intent.goal if result.intent else result.human_summary
-                        self._update_history(user_text, history_summary)
+                        # Skip when translation failed (result.intent is None) —
+                        # storing the error message would pollute the LLM's context
+                        # and confuse subsequent queries.
+                        if result.intent:
+                            self._update_history(
+                                user_text,
+                                result.intent.goal,
+                                outcome=arch_status,
+                                human_summary=result.human_summary,
+                            )
 
                     elif kind == "route":
                         # Inter-agent routing: forward the payload to another
@@ -647,7 +709,10 @@ class PipelineCoordinator:
                         # meta must include: target_kind, target_node, and
                         # the message to forward as meta.payload.
                         target_kind = meta.get("target_kind", "pipeline")
-                        target_node = int(meta.get("target_node", 1))
+                        try:
+                            target_node = int(meta.get("target_node", 1))
+                        except (ValueError, TypeError):
+                            target_node = 1
                         payload = meta.get("payload") or {}
                         ok = self._registry.route_to(target_kind, target_node, payload)
                         write_outbox({
@@ -702,7 +767,10 @@ class PipelineCoordinator:
             except Exception:
                 # Log the full traceback but keep running — transient errors
                 # (network blips, MCP timeouts) shouldn't kill the pipeline.
-                self._log("pipeline_error", {})
+                import io as _io
+                _tb = _io.StringIO()
+                traceback.print_exc(file=_tb)
+                self._log("pipeline_error", {"traceback": _tb.getvalue().strip()})
                 traceback.print_exc()
 
             # Drift-free sleep: targets the next absolute tick time so slow

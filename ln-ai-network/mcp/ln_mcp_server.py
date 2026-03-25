@@ -29,7 +29,10 @@ def _env_int(name: str, default: int) -> int:
     v = os.getenv(name)
     if v is None or v.strip() == "":
         return default
-    return int(v)
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
 
 
 @dataclass(frozen=True)
@@ -246,23 +249,34 @@ def btc_wallet_ensure(wallet_name: str) -> Dict[str, Any]:
         if not created.get("ok"):
             return created
 
-    _run_json(_btc_base(cfg) + ["loadwallet", wallet_name], cfg.cmd_timeout_s)
+    # Only call loadwallet if the wallet is not already loaded.
+    # loadwallet on an already-loaded wallet returns error -35; checking first
+    # avoids silently masking that (or any other real) error.
+    loaded = _run_json(_btc_base(cfg) + ["listwallets"], cfg.cmd_timeout_s)
+    already_loaded = wallet_name in (loaded.get("payload") or [])
+    if not already_loaded:
+        result = _run_json(_btc_base(cfg) + ["loadwallet", wallet_name], cfg.cmd_timeout_s)
+        if not result.get("ok"):
+            return result
     return {"ok": True, "payload": {"wallet": wallet_name, "ensured": True}}
 
 
 def btc_getnewaddress(wallet: Optional[str] = None) -> Dict[str, Any]:
     cfg = load_config()
-    return _run_text(_btc_base(cfg, wallet=wallet) + ["getnewaddress"], cfg.cmd_timeout_s)
+    # Default to "shared-wallet" — the wallet created by infra_boot.sh.
+    # Bitcoin Core requires a wallet when multiple wallets are loaded.
+    effective_wallet = wallet or "shared-wallet"
+    return _run_text(_btc_base(cfg, wallet=effective_wallet) + ["getnewaddress"], cfg.cmd_timeout_s)
 
 
-def btc_sendtoaddress(address: str, amount_btc: str, wallet: Optional[str] = "miner") -> Dict[str, Any]:
+def btc_sendtoaddress(address: str, amount_btc: str, wallet: Optional[str] = "shared-wallet") -> Dict[str, Any]:
     """
-    Backward compatible:
-      - existing callers pass (address, amount_btc)
-      - new callers may pass wallet; default is 'miner' to avoid Core wallet -19 error
+    Send an on-chain payment from the named Bitcoin Core wallet.
+    Defaults to "shared-wallet" — the wallet created by infra_boot.sh.
+    Bitcoin Core requires -rpcwallet when multiple wallets are loaded (error -19).
     """
     cfg = load_config()
-    w = wallet if wallet is not None else "miner"
+    w = wallet if wallet is not None else "shared-wallet"
     return _run_text(_btc_base(cfg, wallet=w) + ["sendtoaddress", address, str(amount_btc)], cfg.cmd_timeout_s)
 
 
@@ -388,8 +402,14 @@ def ln_node_start(
     # WSL, and HDD-based environments. Override with env vars if needed:
     #   MCP_NODE_START_TIMEOUT_S  — max seconds to wait (default 30)
     #   MCP_NODE_POLL_INTERVAL_S  — seconds between status checks (default 0.5)
-    start_timeout_s  = float(os.environ.get("MCP_NODE_START_TIMEOUT_S")  or "30")
-    poll_interval_s  = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S")  or "0.5")
+    try:
+        start_timeout_s  = float(os.environ.get("MCP_NODE_START_TIMEOUT_S")  or "30")
+    except (ValueError, TypeError):
+        start_timeout_s  = 30.0
+    try:
+        poll_interval_s  = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S")  or "0.5")
+    except (ValueError, TypeError):
+        poll_interval_s  = 0.5
 
     deadline = time.time() + start_timeout_s
     last_reason = ""
@@ -415,8 +435,14 @@ def ln_node_stop(node: Union[int, str]) -> Dict[str, Any]:
     # often to poll. Uses MCP_NODE_POLL_INTERVAL_S shared with ln_node_start.
     # Override with MCP_NODE_STOP_TIMEOUT_S if your nodes take longer to shut down
     # (e.g. when flushing a large channel DB to disk on slow hardware).
-    stop_timeout_s  = float(os.environ.get("MCP_NODE_STOP_TIMEOUT_S")  or "30")
-    poll_interval_s = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S") or "0.5")
+    try:
+        stop_timeout_s  = float(os.environ.get("MCP_NODE_STOP_TIMEOUT_S")  or "30")
+    except (ValueError, TypeError):
+        stop_timeout_s  = 30.0
+    try:
+        poll_interval_s = float(os.environ.get("MCP_NODE_POLL_INTERVAL_S") or "0.5")
+    except (ValueError, TypeError):
+        poll_interval_s = 0.5
 
     deadline = time.time() + stop_timeout_s
     while time.time() < deadline:
@@ -462,7 +488,7 @@ def ln_getinfo(node: Union[int, str]) -> Dict[str, Any]:
 
     err = str(gi.get("error") or "")
     if _looks_like_node_not_running(err):
-        return {"ok": True, "payload": {"node": nd.name, "running": False, "reason": err, "argv": gi.get("argv")}}
+        return {"ok": False, "error": f"Node {nd.name} is not running: {err}"}
     return gi
 
 
@@ -523,7 +549,13 @@ def ln_openchannel(from_node: Union[int, str], peer_id: str, amount_sat: int) ->
 def ln_invoice(node: Union[int, str], amount_msat: int, label: str, description: str) -> Dict[str, Any]:
     cfg = load_config()
     nd = _require_node_dir(cfg, node)
-    return _run_json(_ln_base(cfg, nd) + ["invoice", str(int(amount_msat)), label, description], cfg.cmd_timeout_s)
+    # Guard: Core Lightning requires a globally unique, non-empty label per invoice.
+    # LLMs sometimes emit an empty string or reuse a generic label across runs.
+    # If the label is blank, synthesise one from the current timestamp so the call
+    # never fails with "Duplicate label" (error code 900).
+    import time as _time
+    effective_label = label.strip() if label and label.strip() else f"inv-{int(_time.time() * 1000)}"
+    return _run_json(_ln_base(cfg, nd) + ["invoice", str(int(amount_msat)), effective_label, description], cfg.cmd_timeout_s)
 
 
 def ln_pay(from_node: Union[int, str], bolt11: str) -> Dict[str, Any]:
@@ -556,14 +588,17 @@ def network_health() -> Dict[str, Any]:
         status = "down"
 
     return {
-        "status": status,
-        "network": cfg.network,
-        "runtime_dir": str(cfg.runtime_dir),
-        "bitcoin_dir": str(cfg.bitcoin_dir),
-        "lightning_base": str(cfg.lightning_base),
-        "bitcoin": btc,
-        "nodes": nodes_out,
-        "summary": {"bitcoin_ok": bitcoin_ok, "nodes_total": len(node_dirs), "nodes_running": running_count},
+        "ok": True,
+        "payload": {
+            "status": status,
+            "network": cfg.network,
+            "runtime_dir": str(cfg.runtime_dir),
+            "bitcoin_dir": str(cfg.bitcoin_dir),
+            "lightning_base": str(cfg.lightning_base),
+            "bitcoin": btc,
+            "nodes": nodes_out,
+            "summary": {"bitcoin_ok": bitcoin_ok, "nodes_total": len(node_dirs), "nodes_running": running_count},
+        },
     }
 
 
@@ -627,6 +662,67 @@ def sys_netinfo() -> Dict[str, Any]:
     }
 
 
+def memory_lookup(
+    query: Optional[str] = None,
+    last_n: int = 5,
+    outcome: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Query the tier-3 episodic archive (runtime/agent/archive.jsonl).
+
+    Returns the last `last_n` completed runs, optionally filtered by keyword
+    (`query` matched against the user prompt and goal) and/or outcome
+    ("ok", "partial", or "failed").
+
+    This is the only tool that reads the archive — it is never injected into
+    the LLM context automatically.
+    """
+    cfg = load_config()
+    archive_path = cfg.runtime_dir / "agent" / "archive.jsonl"
+
+    if not archive_path.exists():
+        return {"ok": True, "payload": {"entries": [], "total": 0, "note": "No archive yet."}}
+
+    try:
+        lines = archive_path.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        return {"ok": False, "error": f"Could not read archive: {e}"}
+
+    entries = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        entries.append(record)
+
+    # Filter by outcome if specified
+    if outcome:
+        entries = [e for e in entries if e.get("outcome") == outcome]
+
+    # Filter by keyword if specified (match against user prompt or goal)
+    if query:
+        q = query.lower()
+        entries = [
+            e for e in entries
+            if q in e.get("user", "").lower() or q in e.get("goal", "").lower()
+        ]
+
+    # Return last N matches
+    matching = entries[-last_n:] if len(entries) > last_n else entries
+
+    return {
+        "ok": True,
+        "payload": {
+            "entries": matching,
+            "total": len(matching),
+        },
+    }
+
+
 def _error(msg: str) -> Dict[str, Any]:
     return {"error": msg}
 
@@ -641,6 +737,12 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
             return network_health()
         if method == "sys_netinfo":
             return sys_netinfo()
+        if method == "memory_lookup":
+            return memory_lookup(
+                query=params.get("query") or None,
+                last_n=int(params.get("last_n", 5)),
+                outcome=params.get("outcome") or None,
+            )
 
         # Bitcoin
         if method == "btc_getblockchaininfo":
@@ -653,7 +755,7 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
             return btc_sendtoaddress(
                 str(params["address"]),
                 str(params["amount_btc"]),
-                wallet=params.get("wallet", "miner"),
+                wallet=params.get("wallet", "shared-wallet"),
             )
         if method == "btc_generatetoaddress":
             return btc_generatetoaddress(int(params["blocks"]), str(params["address"]))

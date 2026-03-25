@@ -103,11 +103,15 @@ if [[ "${MODE}" == "fresh" ]]; then
   ts="$(date +%Y%m%d_%H%M%S)"
   echo "[restart_agent] archiving + clearing inbox/outbox/cursor (ts=${ts})"
 
-  [[ -f "${RUNTIME}/inbox.jsonl"  ]] && cp -f "${RUNTIME}/inbox.jsonl"  "${RUNTIME}/archive/inbox.${ts}.jsonl"  || true
-  [[ -f "${RUNTIME}/outbox.jsonl" ]] && cp -f "${RUNTIME}/outbox.jsonl" "${RUNTIME}/archive/outbox.${ts}.jsonl" || true
+  [[ -f "${RUNTIME}/inbox.jsonl"   ]] && cp -f "${RUNTIME}/inbox.jsonl"   "${RUNTIME}/archive/inbox.${ts}.jsonl"   || true
+  [[ -f "${RUNTIME}/outbox.jsonl"  ]] && cp -f "${RUNTIME}/outbox.jsonl"  "${RUNTIME}/archive/outbox.${ts}.jsonl"  || true
+  [[ -f "${RUNTIME}/history.jsonl" ]] && cp -f "${RUNTIME}/history.jsonl" "${RUNTIME}/archive/history.${ts}.jsonl" || true
+  [[ -f "${RUNTIME}/archive.jsonl" ]] && cp -f "${RUNTIME}/archive.jsonl" "${RUNTIME}/archive/archive.${ts}.jsonl" || true
 
   : > "${RUNTIME}/inbox.jsonl"
   : > "${RUNTIME}/outbox.jsonl"
+  : > "${RUNTIME}/history.jsonl"
+  : > "${RUNTIME}/archive.jsonl"
 
   # reset cursor so read_new() starts from the beginning of the cleared file
   rm -f "${RUNTIME}/inbox.offset" || true

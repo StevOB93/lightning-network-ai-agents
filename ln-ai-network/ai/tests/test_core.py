@@ -30,7 +30,7 @@ class TestAgentConfig:
         assert cfg.llm_rpm == 30
         assert cfg.llm_tpm == 60_000
         assert cfg.llm_temperature == 0.2
-        assert cfg.max_history_messages == 40
+        assert cfg.max_history_messages == 6
         assert cfg.backoff_base_ms == 1_000
         assert cfg.circuit_breaker_after == 6
 

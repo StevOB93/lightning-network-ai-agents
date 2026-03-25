@@ -35,7 +35,7 @@ from __future__ import annotations
 # =============================================================================
 
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 from ai.core.backoff import DeterministicBackoff
 from ai.core.concurrency import ConcurrencyGate
@@ -87,6 +87,41 @@ class GuardedBackend(LLMBackend):
         # Prefer a provider-specific estimator; fall back to the heuristic.
         self._estimator: TokenEstimator = inner.token_estimator() or HeuristicTokenEstimator()
 
+    def stream(self, request: LLMRequest) -> Iterable[str]:
+        """
+        Stream text tokens through the inner backend with concurrency and
+        backoff guards applied.
+
+        Rate limiting is not pre-applied (token count is unknown upfront for
+        streaming), but the concurrency gate and circuit breaker are enforced
+        so that streaming calls respect the same backoff state as step() calls.
+        """
+        while self._backoff.blocked():
+            now = time.monotonic()
+            wake = max(
+                self._backoff.state.blocked_until,
+                self._backoff.state.circuit_open_until,
+            )
+            time.sleep(max(0.05, min(wake - now, 1.0)))
+
+        req_id = id(request)
+        self._gate.acquire(blocking=True)
+        try:
+            yield from self._inner.stream(request)
+            self._backoff.note_success()
+        except (TransientAPIError, RateLimitError) as exc:
+            retry_after = getattr(exc, "retry_after_s", None)
+            self._backoff.note_failure(req_id, retry_after_s=retry_after)
+            raise
+        except (AuthError, PermanentAPIError):
+            # Caller bugs — no backoff. Re-raise immediately without touching state.
+            raise
+        except Exception:
+            self._backoff.note_failure(req_id)
+            raise
+        finally:
+            self._gate.release()
+
     def token_estimator(self) -> Optional[TokenEstimator]:
         """Delegate to the inner backend's estimator (or heuristic fallback)."""
         return self._estimator
@@ -135,8 +170,13 @@ class GuardedBackend(LLMBackend):
                 retry_after = getattr(exc, "retry_after_s", None)
                 self._backoff.note_failure(req_id, retry_after_s=retry_after)
                 raise
-            # AuthError / PermanentAPIError: no backoff — these are caller bugs,
-            # not provider instability. Re-raise without touching backoff state.
+            except (AuthError, PermanentAPIError):
+                # Caller bugs — no backoff. Re-raise immediately without touching state.
+                raise
+            except Exception:
+                # Unexpected error — record failure so circuit breaker opens correctly.
+                self._backoff.note_failure(req_id)
+                raise
 
             # ── 5. Record success and reconcile actual token usage ─────────────
             self._backoff.note_success()

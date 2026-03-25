@@ -65,6 +65,8 @@ sudo apt install -y \
   python3-pip \
   python3-venv \
   python3-mako \
+  python3-dev \
+  libffi-dev \
   gettext \
   libzmq3-dev \
   net-tools
@@ -172,14 +174,28 @@ if grep -qi microsoft /proc/version; then
 fi
 
 ############################################################
+# LLM backend setup (interactive prompt)
+############################################################
+SETUP_LLM="$SCRIPT_DIR/tools/setup_llm.sh"
+if [[ -x "$SETUP_LLM" ]]; then
+  echo
+  bash "$SETUP_LLM"
+else
+  echo "[WARN] $SETUP_LLM not found or not executable — skipping LLM setup."
+  echo "[INFO] Run scripts/tools/setup_llm.sh later to configure your LLM backend."
+fi
+
+############################################################
 # Done
 ############################################################
 echo "=================================================="
 echo " Install complete ✔"
 echo
 echo " Next steps:"
-echo "   cd $PROJECT_ROOT"
-echo "   ./scripts/1.start.sh 2"
-echo "   ./scripts/network_test.sh"
-echo "   ./scripts/shutdown.sh 2"
+REPO_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
+echo "   source $PROJECT_ROOT/env.sh   # load env vars"
+echo "   cd $REPO_ROOT"
+echo "   ./start.sh 2"
+echo "   ./ln-ai-network/scripts/network_test.sh"
+echo "   ./stop.sh 2"
 echo "=================================================="
