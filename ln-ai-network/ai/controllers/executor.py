@@ -439,6 +439,16 @@ class Executor:
                         ok=False, error=str(e), raw_result=None,
                         retries_used=0, skipped=False,
                     )
+                except Exception as e:  # noqa: BLE001
+                    # Unexpected error from the worker thread — convert to a
+                    # failed StepResult so sibling steps can still complete and
+                    # the wave result list has no None slots.
+                    wave_results[idx] = StepResult(
+                        step_id=step.step_id, tool=step.tool, args=step.args,
+                        ok=False,
+                        error=f"Unexpected error in worker thread: {e.__class__.__name__}: {e}",
+                        raw_result=None, retries_used=0, skipped=False,
+                    )
         return wave_results  # type: ignore[return-value]  # all slots filled
 
     def _execute_step(

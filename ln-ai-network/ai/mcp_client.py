@@ -100,13 +100,21 @@ class FixtureMCPClient:
             node_raw = args.get("node")
             if node_raw is None:
                 return {"error": "Missing required arg 'node'", "tool": tool}
-            return data["ln_getinfo"][str(int(node_raw))]
+            try:
+                node_key = str(int(node_raw))
+            except (ValueError, TypeError):
+                return {"error": f"Invalid node value: {node_raw!r}", "tool": tool}
+            return data["ln_getinfo"].get(node_key, {"error": f"No fixture for node {node_key}", "tool": tool})
 
         if tool == "ln_listfunds":
             node_raw = args.get("node")
             if node_raw is None:
                 return {"error": "Missing required arg 'node'", "tool": tool}
-            return data["ln_listfunds"][str(int(node_raw))]
+            try:
+                node_key = str(int(node_raw))
+            except (ValueError, TypeError):
+                return {"error": f"Invalid node value: {node_raw!r}", "tool": tool}
+            return data["ln_listfunds"].get(node_key, {"error": f"No fixture for node {node_key}", "tool": tool})
 
         # Unknown tool: return an error dict in the standard MCP error shape
         return {"error": f"Unknown tool '{tool}'", "tool": tool, "args": args}

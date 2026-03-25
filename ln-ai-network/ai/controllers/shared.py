@@ -111,11 +111,12 @@ def _repair_json(text: str) -> str:
     Transformations applied in order:
       1. Strip // single-line comments (not valid JSON)
       2. Strip /* multi-line */ comments (not valid JSON)
-      3. Remove trailing commas before } or ] (Python allows, JSON doesn't)
-      4. Replace single-quoted strings with double-quoted (Python style → JSON)
-      5. Add missing commas between adjacent string values on separate lines
-      6. Add missing commas between adjacent object fields
-      7. Truncate any trailing garbage after the final closing brace
+      3. Evaluate arithmetic expressions in numeric values (e.g. 10000 * 1000 → 10000000)
+      4. Remove trailing commas before } or ] (Python allows, JSON doesn't)
+      5. Replace single-quoted strings with double-quoted (Python style → JSON)
+      6. Add missing commas between adjacent string values on separate lines
+      7. Add missing commas between adjacent object fields
+      8. Truncate any trailing garbage after the final closing brace
 
     This is intentionally permissive — parsing something slightly malformed is
     better than failing the whole request and burning another LLM call.
@@ -124,6 +125,20 @@ def _repair_json(text: str) -> str:
     text = re.sub(r'//[^\n]*', '', text)
     # Strip multi-line comments (/* ... */)
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    # Evaluate arithmetic expressions that LLMs sometimes write as JSON values
+    # (e.g. "amount_msat": 10000 * 1000 → "amount_msat": 10000000).
+    # Only applied to integer * integer, + integer, etc. — not inside strings.
+    def _eval_arith(m: re.Match) -> str:
+        try:
+            a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+            if op == '*':   return str(a * b)
+            if op == '+':   return str(a + b)
+            if op == '-':   return str(a - b)
+            if op == '/' and b != 0: return str(a // b)
+        except Exception:
+            pass
+        return m.group(0)
+    text = re.sub(r'\b(\d+)\s*([*+\-/])\s*(\d+)\b', _eval_arith, text)
     # Remove trailing commas before } or ]
     text = re.sub(r',\s*([}\]])', r'\1', text)
     # Replace single quotes with double quotes (simple cases only)

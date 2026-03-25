@@ -220,7 +220,7 @@ def _normalize_tool_args(tool: str, args: Any) -> Tuple[Dict[str, Any], Optional
         try:
             btc_val = float(a["amount_btc"])
         except (TypeError, ValueError):
-            btc_val = -1
+            return a, f"amount_btc is not a valid number: {a['amount_btc']!r}", changed
         if btc_val <= 0:
             return a, "amount_btc must be a positive number", changed
 

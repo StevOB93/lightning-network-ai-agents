@@ -255,7 +255,10 @@ def btc_wallet_ensure(wallet_name: str) -> Dict[str, Any]:
 
 def btc_getnewaddress(wallet: Optional[str] = None) -> Dict[str, Any]:
     cfg = load_config()
-    return _run_text(_btc_base(cfg, wallet=wallet) + ["getnewaddress"], cfg.cmd_timeout_s)
+    # Default to "shared-wallet" — the wallet created by infra_boot.sh.
+    # Bitcoin Core requires a wallet when multiple wallets are loaded.
+    effective_wallet = wallet or "shared-wallet"
+    return _run_text(_btc_base(cfg, wallet=effective_wallet) + ["getnewaddress"], cfg.cmd_timeout_s)
 
 
 def btc_sendtoaddress(address: str, amount_btc: str, wallet: Optional[str] = "miner") -> Dict[str, Any]:

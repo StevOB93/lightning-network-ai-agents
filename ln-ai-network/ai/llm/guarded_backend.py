@@ -173,6 +173,10 @@ class GuardedBackend(LLMBackend):
             except (AuthError, PermanentAPIError):
                 # Caller bugs — no backoff. Re-raise immediately without touching state.
                 raise
+            except Exception:
+                # Unexpected error — record failure so circuit breaker opens correctly.
+                self._backoff.note_failure(req_id)
+                raise
 
             # ── 5. Record success and reconcile actual token usage ─────────────
             self._backoff.note_success()

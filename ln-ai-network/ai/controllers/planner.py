@@ -46,19 +46,19 @@ class PlannerConfig:
     """
     Immutable configuration for the Planner LLM call.
 
-    max_output_tokens: 1024 is generous for multi-step plans (typically
-      3-6 steps). Larger plans may be a sign the LLM is adding unnecessary steps.
+    max_output_tokens: 2048 supports up to ~10-step plans including the full
+      node-start → connect → channel-open → mine-blocks → invoice → pay sequence.
     temperature: Very low (0.1) — planning requires precise, deterministic JSON.
     max_retries: Up to 2 additional self-correction attempts after first failure.
     """
-    max_output_tokens: int = 1024
+    max_output_tokens: int = 2048
     temperature: float = 0.1
     max_retries: int = 2
 
     @staticmethod
     def from_env() -> PlannerConfig:
         return PlannerConfig(
-            max_output_tokens=_env_int("PLANNER_MAX_OUTPUT_TOKENS", 1024),
+            max_output_tokens=_env_int("PLANNER_MAX_OUTPUT_TOKENS", 2048),
             temperature=_env_float("PLANNER_TEMPERATURE", 0.1),
             max_retries=_env_int("PLANNER_MAX_RETRIES", 2),
         )
@@ -106,7 +106,7 @@ Rules:
   tool call multiple times unless there is a clear reason.
 - If the intent is "noop" or has no clear tool path, return "steps": [].
 - Available nodes in this regtest environment: 1 through {node_count}. Do NOT use node numbers outside this range.
-- The default Bitcoin wallet is "miner". Use wallet_name="miner" for btc_wallet_ensure.
+- The default Bitcoin wallet is "shared-wallet". Use wallet_name="shared-wallet" for btc_wallet_ensure.
 - For diagnostics or status checks, use "network_health" — it returns node statuses and
   blockchain info in a single call. Do not call ln_node_status for each node separately.
   network_health result fields: $stepN.result.payload.status ("ok"|"degraded"|"down"),
@@ -131,6 +131,15 @@ Rules:
   ln_node_start(node=2) → ln_getinfo(node=2) → ln_connect(from_node=1,
   peer_id=$step2.result.payload.id, host="127.0.0.1", port=$step2.result.payload.binding[0].port)
   → ln_openchannel(from_node=1, peer_id=$step2.result.payload.id, amount_sat=<amount>).
+- After ln_openchannel, the funding tx must be confirmed before payments work. Always add
+  these two mining steps immediately after ln_openchannel (let N = step_id of ln_openchannel,
+  M = step_id of btc_getnewaddress):
+    btc_getnewaddress: args={{}}, depends_on=[N]
+    btc_generatetoaddress: args={{"blocks": 6, "address": "$stepM.result.payload"}}, depends_on=[M]
+  ln_invoice and ln_pay must have depends_on that includes the btc_generatetoaddress step_id.
+- All JSON values must be valid JSON literals. NEVER write arithmetic expressions such as
+  "amount_msat": 10000 * 1000. Compute values yourself before writing them:
+  if amount_sat=10000 then write "amount_msat": 10000000 (multiply by 1000 mentally).
 - For payment flows: ln_invoice returns $stepN.result.payload.bolt11 (the BOLT11 invoice
   string). ln_pay requires bolt11=$stepN.result.payload.bolt11. Full send-payment plan:
   ln_invoice(node=<receiver>, amount_msat=<msat>, label="<unique>", description="<text>")
