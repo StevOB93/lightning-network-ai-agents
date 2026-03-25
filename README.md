@@ -7,7 +7,7 @@
 
 A research harness that lets AI agents autonomously operate a Lightning Network using natural language. The system translates plain-English instructions into structured execution plans, runs them against real Bitcoin and Lightning nodes via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), and reports results back in human-readable form — all on a local regtest network with no real funds at risk.
 
-> **CSCI 499 — Senior Capstone Project, Texas A&M University–Commerce**
+> **CSCI 499 — Senior Capstone Project, East Texas A&M University**
 
 ---
 
