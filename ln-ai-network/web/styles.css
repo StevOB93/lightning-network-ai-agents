@@ -1,1387 +1,245 @@
-/* =============================================================================
-   Lightning Agent UI — styles.css
-
-   Design system:
-     :root        — design tokens (colors, radii, shadow)
-     Typography   — Space Grotesk (UI) + IBM Plex Mono (code/trace)
-     Layout       — .page-shell (max 1280px centered column)
-     Components   — .card, .status-bar, .tab-bar, .tab-panel, buttons
-     Feature CSS  — pipeline stages, trace log, archive panel, network viz
-     Responsive   — breakpoints at 960px and 600px
-
-   Color naming:
-     --bg / --surface / --surface-2 / --surface-3  — dark layered backgrounds
-     --ink / --ink-2 / --muted                      — text hierarchy
-     --line / --line-strong                          — subtle borders
-     --accent (#f7a922 amber)                        — primary brand color
-     --accent-2 (#22c55e green)                      — success/online state
-     --danger (#ef4444 red)                          — errors/offline
-     --info (#38bdf8 sky)                            — informational tags
-     --purple                                        — type tags
-   ============================================================================= */
-
-/* ── Design tokens ── */
 :root {
-  --bg:          #0f1117;
-  --surface:     #161b27;
-  --surface-2:   #1d2436;
-  --surface-3:   #242c40;
-  --ink:         #e8eaf0;
-  --ink-2:       #c5c9d8;
-  --muted:       #7a82a0;
-  --line:        rgba(255,255,255,0.07);
-  --line-strong: rgba(255,255,255,0.14);
-  --accent:      #f7a922;
-  --accent-dim:  rgba(247,169,34,0.15);
-  --accent-2:    #22c55e;
-  --danger:      #ef4444;
-  --info:        #38bdf8;
-  --purple:      #a78bfa;
-  --shadow:      0 4px 24px rgba(0,0,0,0.5);
-  --radius:      16px;
-  --radius-sm:   10px;
+  --bg: #f3efe5;
+  --paper: rgba(255, 252, 247, 0.88);
+  --ink: #18242c;
+  --muted: #5d6c72;
+  --line: rgba(24, 36, 44, 0.12);
+  --accent: #0f766e;
+  --accent-2: #d97706;
+  --shadow: 0 24px 60px rgba(24, 36, 44, 0.12);
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
 body {
   margin: 0;
-  background: var(--bg);
   color: var(--ink);
   font-family: "Space Grotesk", sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
+  background:
+    radial-gradient(circle at top right, rgba(217, 119, 6, 0.16), transparent 28%),
+    radial-gradient(circle at left center, rgba(15, 118, 110, 0.18), transparent 25%),
+    linear-gradient(180deg, #f7f3ea 0%, #ede4d4 100%);
 }
 
-code, pre, .mono {
-  font-family: "IBM Plex Mono", monospace;
-}
-
-/* ── Layout shell ──
-   Centered column with a max-width cap. The calc ensures 12px breathing room
-   on each side on narrow viewports without a hard min-width constraint.
-   gap: 16px creates uniform spacing between all top-level sections.        */
 .page-shell {
-  width: min(1280px, calc(100vw - 24px));
+  width: min(1180px, calc(100vw - 32px));
   margin: 0 auto;
-  padding: 16px 0 48px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  padding: 32px 0 48px;
 }
 
-/* ── Card base ──
-   All content areas use this as their foundation. Padding 20px/24px gives a
-   comfortable reading gutter. The box-shadow lifts cards off the dark bg.   */
-.card {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 20px 24px;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.card-header h2 {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--ink);
-}
-
-.card-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-/* ── Status bar ──
-   Persistent top strip visible on all tabs. flex-wrap allows the indicators
-   to stack on narrow screens without overflowing.                           */
-.status-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 12px 20px;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.status-bar-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.bolt {
-  font-size: 1.3rem;
-}
-
-.brand-name {
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: var(--accent);
-}
-
-.build-tag {
-  font-size: 0.7rem;
-  color: var(--muted);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 2px 8px;
-}
-
-.status-bar-indicators {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  flex-wrap: wrap;
-}
-
-.indicator {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* Agent online dot — default state is offline red.
-   .indicator.online class added by app.js triggers the green pulse.        */
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--danger);
-  box-shadow: 0 0 0 0 var(--danger);
-  transition: background 0.3s, box-shadow 0.3s;
-}
-
-.indicator.online .dot {
-  background: var(--accent-2);
-  box-shadow: 0 0 6px var(--accent-2);
-  animation: pulse 2s infinite;
-}
-
-/* Ripple animation: the box-shadow expands and fades to create a halo effect */
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
-  50%       { box-shadow: 0 0 0 5px rgba(34, 197, 94, 0);  }
-}
-
-.ind-label {
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-
-.ind-value {
-  font-size: 0.8rem;
-  color: var(--ink-2);
-}
-
-/* ── Tab bar ──
-   Pill-style tabs inside a container card. The active tab uses surface-3 to
-   appear recessed relative to the surrounding surface background.           */
-.tab-bar {
-  display: flex;
-  gap: 4px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 6px;
-}
-
-.tab-btn {
-  flex: 1;
-  border-radius: calc(var(--radius) - 4px);
-  padding: 9px 16px;
-  font-size: 0.88rem;
-  font-weight: 600;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid transparent;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.tab-btn:hover {
-  opacity: 1;
-  transform: none;
-  background: var(--surface-2);
-  color: var(--ink-2);
-}
-
-.tab-btn.active {
-  background: var(--surface-3);
-  color: var(--ink);
-  border-color: var(--line-strong);
-}
-
-/* ── Tab panels ──
-   Only one panel visible at a time. app.js toggles the `hidden` attribute
-   rather than display:none to preserve scroll position in hidden panels.    */
-.tab-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.tab-panel[hidden] {
-  display: none;
-}
-
-/* ── Prompt hero ──
-   Two-column grid: left = descriptive copy, right = textarea + action row.
-   gradient background distinguishes it as the primary action area.         */
-.prompt-hero {
+.hero {
   display: grid;
-  grid-template-columns: 1fr 1.6fr;
-  gap: 24px;
-  align-items: start;
-  background: linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%);
-  border-color: var(--line-strong);
+  grid-template-columns: 1.6fr 1fr;
+  gap: 20px;
+  align-items: stretch;
 }
 
-.prompt-hero-copy h1 {
+.hero-copy,
+.status-card,
+.panel {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+}
+
+.hero-copy {
+  padding: 28px;
+}
+
+.eyebrow {
   margin: 0 0 10px;
-  font-size: clamp(1.4rem, 2.5vw, 2rem);
-  line-height: 1.15;
   color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: clamp(2rem, 4vw, 4rem);
+  line-height: 0.98;
 }
 
 .lede {
   margin: 0;
+  max-width: 60ch;
   color: var(--muted);
-  font-size: 0.9rem;
-  max-width: 42ch;
+  font-size: 1.05rem;
 }
 
-.prompt-hero-form {
+.hero-status {
+  display: grid;
+  gap: 16px;
+}
+
+.status-card {
+  padding: 22px;
+}
+
+.status-card.accent {
+  background: linear-gradient(135deg, rgba(217, 119, 6, 0.13), rgba(255, 252, 247, 0.9));
+}
+
+.status-label {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+code,
+pre {
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.panel {
+  padding: 24px;
+}
+
+.controls,
+.result {
+  min-height: 420px;
+}
+
+.panel-header {
   display: flex;
-  flex-direction: column;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 1.35rem;
+}
+
+.button-row {
+  display: flex;
+  gap: 12px;
+  margin: 18px 0;
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 14px 18px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+.primary {
+  color: #f7f8f5;
+  background: linear-gradient(135deg, var(--accent), #155e75);
+}
+
+.secondary {
+  color: var(--ink);
+  background: rgba(24, 36, 44, 0.06);
+}
+
+.wide {
+  width: 100%;
+}
+
+.prompt-block {
+  display: grid;
   gap: 10px;
+  margin-bottom: 18px;
+}
+
+.prompt-block span {
+  font-size: 0.95rem;
+  font-weight: 700;
 }
 
 textarea {
   width: 100%;
   resize: vertical;
-  min-height: 80px;
+  min-height: 112px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.78);
+  font: inherit;
+  color: var(--ink);
+}
+
+.mini-log,
+.report-box,
+.item {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.62);
+  border-radius: 18px;
+}
+
+.mini-log {
+  margin-top: 16px;
   padding: 14px 16px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-3);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.95rem;
-  transition: border-color 0.2s;
-}
-
-textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-textarea::placeholder {
   color: var(--muted);
 }
 
-.prompt-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.action-log {
-  font-size: 0.82rem;
-  color: var(--muted);
-  padding: 8px 12px;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-}
-
-.action-log.error {
-  color: var(--danger);
-  border-color: rgba(239,68,68,0.3);
-}
-
-/* ── Buttons ──
-   Base: border-radius 999px (pill shape), flex for icon+text alignment.
-   Hover: slight upward lift + opacity fade; active: drop back down.
-   .btn-ghost.small: smaller padding for secondary card-level actions.      */
-button {
-  border: 0;
-  border-radius: 999px;
-  padding: 10px 20px;
-  font: inherit;
-  font-weight: 700;
-  font-size: 0.88rem;
-  cursor: pointer;
-  transition: opacity 0.15s, transform 0.15s;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-button:hover { opacity: 0.85; transform: translateY(-1px); }
-button:active { transform: translateY(0); }
-
-.btn-primary {
-  background: var(--accent);
-  color: #0f1117;
-}
-
-.btn-secondary {
-  background: var(--surface-3);
-  color: var(--ink-2);
-  border: 1px solid var(--line-strong);
-}
-
-.btn-ghost {
-  background: transparent;
-  color: var(--muted);
-  padding: 6px 14px;
-  font-size: 0.82rem;
-  font-weight: 500;
-}
-
-.btn-ghost.small { padding: 4px 10px; }
-
-.btn-ghost-sm {
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 2px 8px;
-  font-size: 0.75rem;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-}
-.btn-ghost-sm:hover { color: var(--fg); border-color: var(--line); }
-
-.btn-icon { font-size: 0.9rem; }
-
-/* ── Pipeline stages ──
-   3-column grid. stage-card border color responds to pipeline result status:
-     .ok   → green left accent
-     .fail → red left accent
-     .skip → muted (step was skipped)
-   The transition allows the border to animate in when status arrives.      */
-.pipeline-stages {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 14px;
-  position: relative;
-}
-
-.stage-connector {
-  display: none; /* decorative — skip for now */
-}
-
-.stage-card {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 18px 20px;
-  transition: border-color 0.3s;
-  position: relative;
-}
-
-.stage-card.ok   { border-color: rgba(34,197,94,0.4); }
-.stage-card.fail { border-color: rgba(239,68,68,0.4); }
-.stage-card.skip { border-color: rgba(122,130,160,0.3); }
-
-.stage-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-/* Circular step number badge — uses flex centering for the single digit */
-.stage-num {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--surface-3);
-  border: 1px solid var(--line-strong);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 0.82rem;
-  flex-shrink: 0;
-}
-
-.stage-title {
-  font-weight: 700;
-  font-size: 0.95rem;
-}
-
-.stage-subtitle {
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-/* Stage badge: pill that shows ok/fail/running/— with semantic color */
-.stage-badge {
-  margin-left: auto;
-  font-size: 0.72rem;
-  font-weight: 700;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.stage-badge.ok   { color: var(--accent-2); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
-.stage-badge.fail { color: var(--danger);   border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
-.stage-badge.skip { color: var(--muted);    border-color: var(--line); }
-
-.stage-body {
-  font-size: 0.85rem;
-}
-
-.stage-error {
-  color: var(--danger);
-  font-size: 0.82rem;
-  word-break: break-word;
-}
-
-/* ── Intent display ── */
-.intent-type-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-/* Pill tags used throughout — each color variant maps to a semantic meaning:
-   blue=info, orange=action, purple=type, green=success, gray=neutral, teal=special */
-.tag {
-  font-size: 0.72rem;
-  font-weight: 700;
-  padding: 2px 10px;
-  border-radius: 999px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.tag-blue   { background: rgba(56,189,248,0.15); color: var(--info);   border: 1px solid rgba(56,189,248,0.3); }
-.tag-orange { background: rgba(247,169,34,0.15); color: var(--accent); border: 1px solid rgba(247,169,34,0.3); }
-.tag-purple { background: rgba(167,139,250,0.15);color: var(--purple); border: 1px solid rgba(167,139,250,0.3);}
-.tag-green  { background: rgba(34,197,94,0.15);  color: var(--accent-2);border: 1px solid rgba(34,197,94,0.3); }
-.tag-gray   { background: var(--surface-3);      color: var(--muted);  border: 1px solid var(--line); }
-.tag-teal   { background: rgba(20,184,166,0.15); color: #2dd4bf;       border: 1px solid rgba(20,184,166,0.3);}
-
-.intent-goal {
-  font-weight: 600;
-  color: var(--ink);
-  font-size: 0.82rem;
-}
-
-.intent-summary {
-  color: var(--ink-2);
-  margin-bottom: 10px;
-  font-size: 0.83rem;
-}
-
-/* Two-column table for intent context fields (key → value pairs from IntentBlock) */
-.ctx-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-bottom: 8px;
-  font-size: 0.78rem;
-}
-
-.ctx-key {
-  color: var(--muted);
-  padding: 3px 8px 3px 0;
-  white-space: nowrap;
-  vertical-align: top;
-}
-
-.ctx-val {
-  color: var(--ink-2);
-  font-family: "IBM Plex Mono", monospace;
-  word-break: break-all;
-  padding: 3px 0;
-}
-
-.criteria-list {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-/* Clarification block: shown when the intent has pending questions for the user */
-.clarif-block {
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: rgba(247,169,34,0.08);
-  border: 1px solid rgba(247,169,34,0.25);
-  border-radius: var(--radius-sm);
-  font-size: 0.78rem;
-  color: var(--accent);
-}
-
-.clarif-block ul { margin: 4px 0 0; padding-left: 16px; }
-
-/* ── Plan display ── */
-/* plan_rationale: displayed above the step list as a muted italic block */
-.rationale {
-  font-size: 0.78rem;
-  margin-bottom: 10px;
-  padding: 8px 12px;
-  background: var(--surface-3);
-  border-radius: var(--radius-sm);
-}
-
-.plan-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.plan-step {
-  padding: 10px 12px;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  font-size: 0.8rem;
-}
-
-.plan-step-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.step-num {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--surface-2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.7rem;
-  font-weight: 700;
-  flex-shrink: 0;
-  color: var(--muted);
-}
-
-/* Tool name pill uses accent amber to visually link to the planner stage color */
-.step-tool {
-  font-size: 0.78rem;
-  color: var(--accent);
-  background: var(--accent-dim);
-  padding: 1px 7px;
-  border-radius: 5px;
-}
-
-/* on_error policy badge — color encodes severity: red=abort, amber=retry, gray=skip */
-.step-on-error {
-  font-size: 0.68rem;
-  padding: 1px 7px;
-  border-radius: 999px;
-  margin-left: auto;
-  font-weight: 700;
-}
-
-.on-error-abort { background: rgba(239,68,68,0.1);  color: var(--danger);   border: 1px solid rgba(239,68,68,0.25); }
-.on-error-retry { background: rgba(247,169,34,0.1); color: var(--accent);   border: 1px solid rgba(247,169,34,0.25);}
-.on-error-skip  { background: rgba(122,130,160,0.1);color: var(--muted);    border: 1px solid var(--line); }
-
-.step-args {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.72rem;
-  color: var(--muted);
-  word-break: break-all;
-  margin-bottom: 3px;
-}
-
-.step-outcome {
-  font-size: 0.75rem;
-}
-
-/* ── Executor display ──
-   Left-border color indicates step result: green=ok, red=fail, gray=skipped.
-   .step-skipped uses opacity:0.7 to de-emphasize steps that were intentionally
-   skipped (on_error=skip) vs steps that actually failed.                   */
-.exec-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.exec-step {
-  padding: 10px 12px;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  font-size: 0.8rem;
-}
-
-.exec-step.step-ok      { border-left: 3px solid var(--accent-2); }
-.exec-step.step-fail    { border-left: 3px solid var(--danger); }
-.exec-step.step-skipped { border-left: 3px solid var(--muted); opacity: 0.7; }
-
-.exec-step-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-/* Status icon: ✓ / ✗ / ⊘ — colored to match the step's border */
-.exec-status-icon {
-  font-size: 0.9rem;
-  width: 16px;
-  text-align: center;
-}
-
-.step-ok .exec-status-icon    { color: var(--accent-2); }
-.step-fail .exec-status-icon  { color: var(--danger); }
-.step-skipped .exec-status-icon { color: var(--muted); }
-
-/* Retry count badge — only shown when retries_used > 0 */
-.retry-badge {
-  font-size: 0.68rem;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(247,169,34,0.1);
-  color: var(--accent);
-  border: 1px solid rgba(247,169,34,0.2);
-}
-
-.step-error {
-  margin-top: 4px;
-  font-size: 0.75rem;
-  color: var(--danger);
-  word-break: break-word;
-}
-
-/* ── Summary card ──
-   Gradient background matches the prompt hero to create visual continuity.
-   summary-icon.ok/fail class applied by renderSummary() based on result.success. */
-.summary-card {
-  background: linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%);
-  border-color: var(--line-strong);
-  position: relative;
-}
-
-.summary-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  margin-bottom: 12px;
-}
-
-.summary-icon {
-  font-size: 1.4rem;
-  line-height: 1;
-  flex-shrink: 0;
-}
-
-.summary-icon.ok   { color: var(--accent-2); }
-.summary-icon.fail { color: var(--danger); }
-
-.summary-title {
-  font-weight: 700;
-  font-size: 0.95rem;
-}
-
-.summary-ts {
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-/* pre-wrap preserves the LLM's newlines in multi-sentence summaries */
-.summary-body {
-  margin: 0;
-  white-space: pre-wrap;
-  font-size: 0.88rem;
-  color: var(--ink-2);
-  line-height: 1.6;
-  word-break: break-word;
-}
-
-/* ── Network visualization ──
-   D3 injects an SVG element into .network-viz. The SVG is set to 100% width
-   via CSS (not inline attributes) so it scales with the container.
-   The container uses overflow:hidden to clip the D3 canvas edges.          */
-.network-card {}
-
-.network-viz {
-  width: 100%;
+.report-box {
   min-height: 320px;
-  background: var(--surface-2);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
+  max-height: 520px;
+  padding: 18px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
-.network-viz svg {
-  display: block;
-  width: 100%;
-}
-
-.network-hint {
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-/* ── Bottom grid ── (Logs tab)
-   1.2fr : 1fr split gives the trace log card slightly more width than the
-   inbox/outbox queue panels, reflecting their relative importance.         */
-.bottom-grid {
+.list {
   display: grid;
-  grid-template-columns: 1.2fr 1fr;
-  gap: 14px;
-  align-items: start;
+  gap: 12px;
+  margin-top: 14px;
 }
 
-/* ── Trace log card ──
-   max-height on the card prevents it from pushing other content off screen.
-   The inner .trace-log also has a max-height + overflow-y:auto so it scrolls
-   independently within the card.                                            */
-.trace-card {
-  max-height: 420px;
-  display: flex;
-  flex-direction: column;
-  position: relative;
+.item {
+  padding: 14px 16px;
 }
 
-/* "auto" badge indicates trace rows append automatically without user action */
-.auto-badge {
-  font-size: 0.68rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(34,197,94,0.1);
-  color: var(--accent-2);
-  border: 1px solid rgba(34,197,94,0.25);
-  font-weight: 700;
-}
-
-.trace-log {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 340px;
-  padding-right: 4px;
-}
-
-/* Thin custom scrollbar — only visible in Webkit; Firefox uses scrollbar-width */
-.trace-log::-webkit-scrollbar { width: 4px; }
-.trace-log::-webkit-scrollbar-track { background: var(--surface-2); border-radius: 2px; }
-.trace-log::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 2px; }
-
-/* Individual trace event row: flex layout for ts | kind | detail columns */
-.trace-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 0.75rem;
-  background: var(--surface-3);
-}
-
-.trace-ts {
-  color: var(--muted);
-  font-family: "IBM Plex Mono", monospace;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.trace-kind {
-  color: var(--accent);
-  font-weight: 600;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.trace-detail {
-  color: var(--ink-2);
-  font-family: "IBM Plex Mono", monospace;
-  word-break: break-all;
-  overflow: hidden;
-}
-
-/* ── Queue panels ── */
-.queue-panels {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.queue-card {}
-
-.queue-count {
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--surface-3);
-  color: var(--muted);
-  border: 1px solid var(--line);
-  font-weight: 700;
-}
-
-.item-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-
-.queue-item {
-  padding: 9px 12px;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  font-size: 0.8rem;
-}
-
-.queue-item-head {
+.item-head {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  font-size: 0.78rem;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+  font-weight: 700;
 }
 
-.queue-item-body {
-  font-size: 0.75rem;
+.item-body {
+  color: var(--muted);
+  font-size: 0.93rem;
   word-break: break-word;
 }
 
-/* ── Helpers ── */
-.muted { color: var(--muted); }
-
-/* Centered placeholder shown when a panel has no data yet */
-.empty-state {
-  color: var(--muted);
-  font-size: 0.82rem;
-  text-align: center;
-  padding: 24px 0;
-}
-
-/* ── Copy button ──
-   Absolutely positioned within each card; initially transparent, revealed on
-   card hover. .stage-header > .copy-btn overrides position:absolute since
-   it sits inline in the header row instead.                                */
-.copy-btn {
-  position: absolute;
-  top: 56px;
-  right: 20px;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
-  z-index: 1;
-  line-height: 1.6;
-}
-
-.stage-header > .copy-btn { position: static; }
-.summary-card > .copy-btn { top: 20px; right: 24px; }
-
-/* Inline variant: used in stage headers where the button isn't absolutely placed */
-.copy-btn-inline {
-  position: static;
-  opacity: 1;
-  float: right;
-  margin-top: -2px;
-  margin-left: 6px;
-}
-
-/* Reveal copy button when hovering the parent card */
-.stage-card:hover .copy-btn,
-.summary-card:hover .copy-btn,
-.trace-card:hover .copy-btn { opacity: 1; }
-
-.copy-btn:hover { color: var(--ink); }
-/* .copied class applied briefly by app.js after clipboard write success */
-.copy-btn.copied { color: var(--accent-2); border-color: rgba(34,197,94,0.4); opacity: 1; }
-
-/* ── Clear button ──
-   Hidden until the card-header is hovered. Turns red on direct hover to
-   signal a destructive action (clears the DOM, not the file on disk).      */
-.clear-btn {
-  background: none;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  color: var(--muted);
-  font-size: 0.68rem;
-  padding: 1px 6px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
-}
-
-.card-header:hover .clear-btn { opacity: 0.7; }
-.clear-btn:hover { color: var(--danger); opacity: 1; }
-
-/* ── Archive panel ──
-   Sits inside .trace-card, below #trace-log. Hidden by default via the HTML
-   `hidden` attribute; app.js removes `hidden` on toggle-button click.
-   A border-top separator visually divides the live log from the archive.   */
-.archive-panel {
-  border-top: 1px solid var(--line-strong);
-  margin-top: 14px;
-  padding-top: 12px;
-}
-
-.archive-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-
-/* "PAST QUERIES" label — uppercase + letter-spacing matches the design's
-   section-header convention used elsewhere (.auto-badge, etc.)            */
-.archive-panel-title {
-  font-size: 0.78rem;
-  font-weight: 700;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.archive-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 320px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) var(--surface-2);
-}
-
-/* Archive entry: clickable card — hover and .expanded state share the same
-   styling so the card remains visually "selected" while expanded.         */
-.archive-entry {
-  padding: 8px 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.archive-entry:hover,
-.archive-entry.expanded {
-  background: var(--surface-3);
-  border-color: var(--line-strong);
-}
-
-/* Entry head: flex row with req_id badge + status pill + datetime + size */
-.archive-entry-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 0.78rem;
-  flex-wrap: wrap;
-}
-
-.archive-req-id {
-  font-family: "IBM Plex Mono", monospace;
-  font-weight: 700;
-  color: var(--ink);
-}
-
-/* Status pill: three semantic colors matching the archive filenames
-   (ok → green, fail → red, partial → amber)                               */
-.archive-status {
-  font-size: 0.68rem;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.arch-ok      { background: rgba(34,197,94,0.12);  color: var(--accent-2); border: 1px solid rgba(34,197,94,0.3); }
-.arch-fail    { background: rgba(239,68,68,0.12);  color: var(--danger);   border: 1px solid rgba(239,68,68,0.3); }
-.arch-partial { background: rgba(247,169,34,0.12); color: var(--accent);   border: 1px solid rgba(247,169,34,0.3); }
-
-.archive-dt,
-.archive-size {
-  font-size: 0.72rem;
-  font-family: "IBM Plex Mono", monospace;
-  color: var(--muted);
-}
-
-/* Truncated user prompt preview — single line with ellipsis */
-.archive-preview {
-  font-size: 0.75rem;
-  color: var(--muted);
-  margin-top: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Inline trace expansion — rendered below the entry head when the entry is
-   clicked. Reuses .trace-row/.trace-ts/.trace-kind/.trace-detail CSS.
-   max-height + overflow-y:auto allows long traces to scroll independently. */
-.archive-trace-inline {
-  margin-top: 8px;
-  max-height: 280px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) var(--surface-2);
-}
-
-/* ── Archive filters ──
-   Sits between the archive panel header and the archive list.
-   Stacks the search input and filter pills vertically with a small gap.    */
-.archive-filters {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.archive-search-input {
-  width: 100%;
-  padding: 7px 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-3);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.82rem;
-  transition: border-color 0.2s;
-}
-
-.archive-search-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.archive-search-input::placeholder {
-  color: var(--muted);
-}
-
-/* Filter pill row — horizontally scrollable on very narrow widths */
-.archive-status-filters {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-/* Filter pill buttons — smaller than the main button base style */
-.arch-filter-btn {
-  border-radius: 999px;
-  padding: 3px 12px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  background: var(--surface-3);
-  color: var(--muted);
-  border: 1px solid var(--line-strong);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.arch-filter-btn:hover {
-  opacity: 1;
-  transform: none;
-  background: var(--surface-2);
-  color: var(--ink-2);
-}
-
-.arch-filter-btn.active {
-  background: var(--accent-dim);
-  color: var(--accent);
-  border-color: rgba(247,169,34,0.4);
-}
-
-/* ── Metrics card ──
-   Grid of stat tiles; each tile shows a value + label pair.               */
-.metrics-card {}
-
-.metrics-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-}
-
-.metric-tile {
-  flex: 1 1 80px;
-  min-width: 80px;
-  padding: 14px 16px;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  text-align: center;
-}
-
-.metric-value {
-  font-size: 1.5rem;
-  font-weight: 700;
-  font-family: "IBM Plex Mono", monospace;
-  color: var(--ink);
-  line-height: 1.1;
-  margin-bottom: 4px;
-}
-
-.metric-value.metric-ok      { color: var(--accent-2); }
-.metric-value.metric-partial { color: var(--accent); }
-.metric-value.metric-fail    { color: var(--danger); }
-
-.metric-label {
-  font-size: 0.72rem;
-  color: var(--muted);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-/* ── Responsive ──
-   960px: collapse side-by-side grids to single column
-   600px: stack status bar vertically, reduce top padding                   */
-@media (max-width: 960px) {
-  .prompt-hero       { grid-template-columns: 1fr; }
-  .pipeline-stages   { grid-template-columns: 1fr; }
-  .bottom-grid       { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 600px) {
-  .status-bar { flex-direction: column; align-items: flex-start; }
-  .page-shell { padding-top: 12px; }
-}
-
-/* ── Crash kit card ── */
-.crash-kit-card {
-  margin-top: 0; /* gap handled by parent flex */
-}
-
-.crash-kit-hint {
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-
-/* Scrollable monospace preview of the crash kit text */
-.crash-kit-preview {
-  margin: 0;
-  padding: 12px 14px;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.72rem;
-  color: var(--ink-2);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 220px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) var(--surface-2);
-  line-height: 1.5;
-}
-
-/* ── Status bar actions (shutdown button container) ── */
-.status-bar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-
-/* Danger button variant — small pill used for the shutdown action */
-.btn-danger-sm {
-  background: rgba(239,68,68,0.12);
-  color: var(--danger);
-  border: 1px solid rgba(239,68,68,0.35);
-  border-radius: 999px;
-  padding: 5px 14px;
-  font-size: 0.8rem;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, opacity 0.15s, transform 0.15s;
-}
-
-.btn-danger-sm:hover {
-  background: rgba(239,68,68,0.22);
-  border-color: rgba(239,68,68,0.6);
-  opacity: 1;
-  transform: translateY(-1px);
-}
-
-.btn-danger-sm:active {
-  transform: translateY(0);
-}
-
-.btn-warning-sm {
-  background: rgba(234,179,8,0.12);
-  color: #ca8a04;
-  border: 1px solid rgba(234,179,8,0.35);
-  border-radius: 999px;
-  padding: 5px 14px;
-  font-size: 0.8rem;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, opacity 0.15s, transform 0.15s;
-}
-
-.btn-warning-sm:hover {
-  background: rgba(234,179,8,0.22);
-  border-color: rgba(234,179,8,0.6);
-  transform: translateY(-1px);
-}
-
-.btn-warning-sm:active { transform: translateY(0); }
-
-/* ── Settings tab ── */
-.settings-card {}
-
-/* Muted note shown in the card-header explaining restart requirement */
-.settings-note {
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-
-.settings-note code {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.76rem;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 1px 6px;
-  color: var(--ink-2);
-}
-
-/* Outer container: vertical stack of setting groups */
-.settings-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  margin-bottom: 20px;
-}
-
-/* Individual group (e.g. "LLM Provider", "Timeouts") */
-.settings-group {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 14px 16px;
-  background: var(--surface-2);
-}
-
-/* Section label above the fields grid */
-.settings-group-title {
-  font-size: 0.78rem;
-  font-weight: 700;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-bottom: 12px;
-}
-
-/* Responsive grid: 2 columns on wide viewports, 1 on narrow */
-.settings-fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-/* Each field: label stacked above input */
-.settings-field {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.settings-field label {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--ink-2);
-}
-
-/* Shared style for text/number inputs and selects in the settings form */
-.settings-input,
-.settings-select {
-  padding: 7px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-3);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.85rem;
-  transition: border-color 0.2s;
-  width: 100%;
-}
-
-.settings-input:focus,
-.settings-select:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.settings-input::placeholder {
-  color: var(--muted);
-}
-
-.settings-select option {
-  background: var(--surface-3);
-  color: var(--ink);
-}
-
-/* Actions row: save button + status message */
-.settings-actions {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding-top: 4px;
-}
-
-/* Inline feedback message next to the save button */
-.settings-status {
-  font-size: 0.82rem;
-  color: var(--muted);
-  transition: color 0.2s;
-}
-
-.settings-status.ok   { color: var(--accent-2); }
-.settings-status.error { color: var(--danger); }
-
-/* ── Streaming cursor (shown on #summary-body while LLM tokens arrive) ── */
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0; }
-}
-.streaming::after {
-  content: "▋";
-  color: var(--accent);
-  animation: blink 0.8s step-end infinite;
+@media (max-width: 900px) {
+  .hero,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .page-shell {
+    width: min(100vw - 20px, 1180px);
+    padding-top: 20px;
+  }
 }

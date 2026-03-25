@@ -47,9 +47,9 @@ class StartupLock:
       - Linux/WSL: fcntl.flock (LOCK_EX | LOCK_NB) on the lock file.
         The OS releases the lock automatically when the process exits or crashes —
         no manual cleanup needed in the normal case.
-      - Windows (no fcntl): reads the lock file and raises if it's non-empty.
-        This is a best-effort fallback; a crash won't auto-release the lock,
-        so the stale file must be deleted manually.
+      - Windows (no fcntl): reads the lock file and validates whether the
+        recorded PID is still running. If the process has exited or crashed,
+        the stale lock is reclaimed automatically.
 
     The lock file stores "pid=<N> started_ts=<T>" for human diagnosis.
 
@@ -71,11 +71,30 @@ class StartupLock:
         fh = self.lock_path.open("a+", encoding="utf-8")
         try:
             if fcntl is None:
-                # Windows fallback: treat non-empty file as "locked"
+                # Windows fallback: check lock file and validate PID liveness.
+                # A crashed process leaves a stale lock that would otherwise
+                # require manual deletion; PID probing fixes this automatically.
                 fh.seek(0)
                 existing = fh.read().strip()
                 if existing:
-                    raise RuntimeError(existing)
+                    stale = False
+                    try:
+                        pid = int(existing.split()[0].replace("pid=", ""))
+                        os.kill(pid, 0)  # signal 0 = existence check only
+                    except (ValueError, ProcessLookupError, OSError):
+                        stale = True
+                    except PermissionError:
+                        pass  # process exists but owned by another user
+                    if stale:
+                        print(
+                            f"[StartupLock] stale lock detected (pid not running); "
+                            f"reclaiming: {self.lock_path}",
+                            flush=True,
+                        )
+                        fh.seek(0)
+                        fh.truncate()
+                    else:
+                        raise RuntimeError(existing)
             else:
                 try:
                     # LOCK_NB causes immediate raise instead of blocking
