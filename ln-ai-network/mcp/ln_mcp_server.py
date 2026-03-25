@@ -541,7 +541,13 @@ def ln_openchannel(from_node: Union[int, str], peer_id: str, amount_sat: int) ->
 def ln_invoice(node: Union[int, str], amount_msat: int, label: str, description: str) -> Dict[str, Any]:
     cfg = load_config()
     nd = _require_node_dir(cfg, node)
-    return _run_json(_ln_base(cfg, nd) + ["invoice", str(int(amount_msat)), label, description], cfg.cmd_timeout_s)
+    # Guard: Core Lightning requires a globally unique, non-empty label per invoice.
+    # LLMs sometimes emit an empty string or reuse a generic label across runs.
+    # If the label is blank, synthesise one from the current timestamp so the call
+    # never fails with "Duplicate label" (error code 900).
+    import time as _time
+    effective_label = label.strip() if label and label.strip() else f"inv-{int(_time.time() * 1000)}"
+    return _run_json(_ln_base(cfg, nd) + ["invoice", str(int(amount_msat)), effective_label, description], cfg.cmd_timeout_s)
 
 
 def ln_pay(from_node: Union[int, str], bolt11: str) -> Dict[str, Any]:
