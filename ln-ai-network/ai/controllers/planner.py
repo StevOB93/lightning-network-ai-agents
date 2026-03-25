@@ -113,11 +113,15 @@ Rules:
   $stepN.result.payload.nodes (list), $stepN.result.payload.summary.nodes_running.
 - CRITICAL: For diagnostic/health-check intents (goal contains phrases like "run a
   diagnostic", "run a test", "check status", "check health", "health check"): use
-  network_health (and optionally ln_listfunds) ONLY — even if success_criteria list
-  "channel_opened" or "payment_sent". Those criteria are translator artifacts; ignore them
-  and produce a 1-2 step health-check plan. Do NOT include ln_connect, ln_openchannel,
-  ln_invoice, or ln_pay unless the goal EXPLICITLY mentions connecting, opening channels,
-  or sending a payment.
+  network_health as step 1, then OPTIONALLY ln_listfunds for node 1 ONLY — even if
+  success_criteria list "channel_opened" or "payment_sent". Those criteria are translator
+  artifacts; ignore them. Do NOT call ln_listfunds, ln_listpeers, or any tool on node 2
+  in a diagnostic plan unless the goal explicitly says to check node 2. Do NOT include
+  ln_connect, ln_openchannel, ln_invoice, or ln_pay. Minimal valid diagnostic plan:
+    network_health (on_error: "abort") → ln_listfunds(node=1, on_error: "skip")
+- For all read-only diagnostic steps (ln_listfunds, ln_listpeers, ln_getinfo called for
+  information only): use on_error: "skip" so the diagnostic completes even when a node
+  is offline. Reserve on_error: "abort" for critical state-changing steps.
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
 - To connect two nodes as peers (ln_connect): you MUST first ensure node 2 is running
   (ln_node_status → ln_node_start if needed), then call ln_getinfo(node=2) to get the
