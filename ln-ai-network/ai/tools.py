@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 #   - More than MAX_CONSEC_READ_ONLY consecutive calls triggers a "stuck" stop.
 READ_ONLY_TOOLS = {
     "network_health",
+    "memory_lookup",        # Read-only: queries the episodic archive, no side effects
     "sys_netinfo",          # Read-only: queries the OS routing table, no side effects
     "btc_getblockchaininfo",
     "btc_getnewaddress",    # Returns an address but doesn't spend or mutate channels
@@ -82,8 +83,9 @@ FALLBACK_ALLOWED_TOOLS = READ_ONLY_TOOLS | STATE_CHANGING_TOOLS
 #   2. Final validation: return an error if keys are still missing after unwrapping
 TOOL_REQUIRED: Dict[str, List[str]] = {
     # Health / system info
-    "network_health": [],
-    "sys_netinfo":    [],
+    "network_health":  [],
+    "memory_lookup":   [],  # all args optional: query, last_n, outcome
+    "sys_netinfo":     [],
 
     # Bitcoin
     "btc_getblockchaininfo": [],
@@ -472,6 +474,7 @@ def llm_tools_schema() -> List[Dict[str, Any]]:
     return [
         # Health / system info
         {"type": "function", "function": {"name": "network_health", "description": "Check Bitcoin+Lightning health.", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "memory_lookup", "description": "Query the episodic archive of past pipeline runs. Returns previous prompts, goals, outcomes, and summaries. Use for recall intents: 'what did I run last time?', 'did the payment succeed?', 'show recent history'.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Keyword to filter by (matched against user prompt and goal). Omit to return all recent entries."}, "last_n": {"type": "integer", "description": "Number of most recent matches to return (default 5)."}, "outcome": {"type": "string", "description": "Filter by outcome: 'ok', 'partial', or 'failed'. Omit for all."}}, "required": []}}},
         {"type": "function", "function": {"name": "sys_netinfo", "description": "Get this machine's hostname and non-loopback IPs. Use before ln_node_start(bind_host, announce_host) to find the correct IP for cross-machine Lightning peer connectivity.", "parameters": {"type": "object", "properties": {}}}},
 
         # Bitcoin

@@ -39,6 +39,7 @@ class TranslatorError(Exception):
 # _parse_intent_block so a hallucinated type doesn't cause a hard failure.
 _VALID_INTENT_TYPES = {
     "open_channel", "set_fee", "rebalance", "pay_invoice", "noop", "freeform",
+    "recall",  # user is asking about past operations / run history
 }
 
 
@@ -84,7 +85,7 @@ single JSON object. Output ONLY the JSON — no markdown fences, no explanation 
 The JSON must have exactly these fields:
 {{
   "goal": "<one machine-readable sentence describing what the user wants>",
-  "intent_type": "<one of: open_channel | set_fee | rebalance | pay_invoice | noop | freeform>",
+  "intent_type": "<one of: open_channel | set_fee | rebalance | pay_invoice | recall | noop | freeform>",
   "context": {{
     "<entity_name>": <value>
   }},
@@ -98,6 +99,8 @@ Intent type guide:
 - set_fee: user wants to change fee policy on a channel
 - rebalance: user wants to move liquidity between channels
 - pay_invoice: user wants to pay a BOLT11 invoice or send a specific payment
+- recall: user is asking about past operations or run history ("what did I run last time?",
+  "did the payment succeed?", "show recent history", "what happened before?", "last run")
 - noop: greeting, unclear request, meta-question about the agent, or anything with no actionable intent
 - freeform: any other actionable request including balance checks, diagnostic tests, status queries, node info, mining, or anything that needs tool calls
 

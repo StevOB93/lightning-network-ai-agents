@@ -138,6 +138,11 @@ class PipelineCoordinator:
         # Each line is a JSON {"role": ..., "content": ...} message.
         self._history_path = _runtime_agent_dir() / "history.jsonl"
 
+        # Tier-3 episodic archive — append-only record of every completed run.
+        # Never trimmed automatically; only wiped on `restart_agent.sh fresh`.
+        # NOT injected into LLM context — only queried on demand via memory_lookup.
+        self._archive_path = _runtime_agent_dir() / "archive.jsonl"
+
         # Rolling conversation history: list of {"role": "user"|"assistant", "content": str}
         # Injected into the Translator's messages so follow-up queries have context.
         # Loaded from disk on startup so context is preserved across restarts.
@@ -241,7 +246,13 @@ class PipelineCoordinator:
         """Serialize and append the pipeline result to the outbox JSONL file."""
         write_outbox(result.to_outbox_dict())
 
-    def _update_history(self, user_text: str, assistant_summary: str) -> None:
+    def _update_history(
+        self,
+        user_text: str,
+        assistant_summary: str,
+        outcome: str = "ok",
+        human_summary: str = "",
+    ) -> None:
         """
         Append the latest exchange to the rolling history buffer and trim to
         cfg.max_history_messages pairs.
@@ -249,6 +260,9 @@ class PipelineCoordinator:
         We store the intent's goal string (not the full verbose summary) as the
         assistant turn. This keeps the history compact and avoids injecting raw
         tool output JSON into subsequent prompts.
+
+        Also appends one record to the tier-3 episodic archive (archive.jsonl)
+        which is never trimmed and only queried on demand via memory_lookup.
         """
         # Deduplicate: if the last exchange in history is identical (same user text
         # AND same assistant goal), skip — repeated identical prompts (e.g. 10x demo
@@ -287,6 +301,29 @@ class PipelineCoordinator:
                         _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
         except Exception:
             pass  # History is advisory — a write failure never crashes the pipeline
+
+        # Tier-3: append one record to the episodic archive (best-effort).
+        # This file is never trimmed — it grows as a permanent audit log.
+        try:
+            archive_record = json.dumps({
+                "ts": int(time.time()),
+                "user": user_text,
+                "goal": assistant_summary,
+                "outcome": outcome,
+                "summary": human_summary,
+            }, ensure_ascii=False)
+            with self._archive_path.open("a", encoding="utf-8") as fh:
+                if _fcntl is not None:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                try:
+                    fh.write(archive_record + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    if _fcntl is not None:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+        except Exception:
+            pass  # Archive write failure is non-fatal
 
     def _handle_sighup(self, signum: int, frame: Any) -> None:
         """Mark config reload as pending (processed safely in the run loop)."""
@@ -659,7 +696,12 @@ class PipelineCoordinator:
                         # storing the error message would pollute the LLM's context
                         # and confuse subsequent queries.
                         if result.intent:
-                            self._update_history(user_text, result.intent.goal)
+                            self._update_history(
+                                user_text,
+                                result.intent.goal,
+                                outcome=arch_status,
+                                human_summary=result.human_summary,
+                            )
 
                     elif kind == "route":
                         # Inter-agent routing: forward the payload to another

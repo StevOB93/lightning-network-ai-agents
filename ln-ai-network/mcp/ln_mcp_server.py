@@ -662,6 +662,67 @@ def sys_netinfo() -> Dict[str, Any]:
     }
 
 
+def memory_lookup(
+    query: Optional[str] = None,
+    last_n: int = 5,
+    outcome: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Query the tier-3 episodic archive (runtime/agent/archive.jsonl).
+
+    Returns the last `last_n` completed runs, optionally filtered by keyword
+    (`query` matched against the user prompt and goal) and/or outcome
+    ("ok", "partial", or "failed").
+
+    This is the only tool that reads the archive — it is never injected into
+    the LLM context automatically.
+    """
+    cfg = load_config()
+    archive_path = cfg.runtime_dir / "agent" / "archive.jsonl"
+
+    if not archive_path.exists():
+        return {"ok": True, "payload": {"entries": [], "total": 0, "note": "No archive yet."}}
+
+    try:
+        lines = archive_path.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        return {"ok": False, "error": f"Could not read archive: {e}"}
+
+    entries = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        entries.append(record)
+
+    # Filter by outcome if specified
+    if outcome:
+        entries = [e for e in entries if e.get("outcome") == outcome]
+
+    # Filter by keyword if specified (match against user prompt or goal)
+    if query:
+        q = query.lower()
+        entries = [
+            e for e in entries
+            if q in e.get("user", "").lower() or q in e.get("goal", "").lower()
+        ]
+
+    # Return last N matches
+    matching = entries[-last_n:] if len(entries) > last_n else entries
+
+    return {
+        "ok": True,
+        "payload": {
+            "entries": matching,
+            "total": len(matching),
+        },
+    }
+
+
 def _error(msg: str) -> Dict[str, Any]:
     return {"error": msg}
 
@@ -676,6 +737,12 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
             return network_health()
         if method == "sys_netinfo":
             return sys_netinfo()
+        if method == "memory_lookup":
+            return memory_lookup(
+                query=params.get("query") or None,
+                last_n=int(params.get("last_n", 5)),
+                outcome=params.get("outcome") or None,
+            )
 
         # Bitcoin
         if method == "btc_getblockchaininfo":

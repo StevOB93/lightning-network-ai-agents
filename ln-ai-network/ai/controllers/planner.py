@@ -122,6 +122,11 @@ Rules:
 - For all read-only diagnostic steps (ln_listfunds, ln_listpeers, ln_getinfo called for
   information only): use on_error: "skip" so the diagnostic completes even when a node
   is offline. Reserve on_error: "abort" for critical state-changing steps.
+- CRITICAL: For recall intents (intent_type == "recall" OR goal contains phrases like
+  "what did I run", "last run", "recent history", "what happened before", "past operations"):
+  use memory_lookup ONLY. Args: query (keyword from user's prompt, optional), last_n
+  (default 5). Do NOT include any Bitcoin or Lightning tools. Minimal recall plan:
+    memory_lookup(query="<keyword>", last_n=5, on_error: "abort")
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
 - To connect two nodes as peers (ln_connect): you MUST first ensure node 2 is running
   (ln_node_status → ln_node_start if needed), then call ln_getinfo(node=2) to get the
