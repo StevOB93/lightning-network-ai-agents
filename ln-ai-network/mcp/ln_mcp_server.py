@@ -249,7 +249,15 @@ def btc_wallet_ensure(wallet_name: str) -> Dict[str, Any]:
         if not created.get("ok"):
             return created
 
-    _run_json(_btc_base(cfg) + ["loadwallet", wallet_name], cfg.cmd_timeout_s)
+    # Only call loadwallet if the wallet is not already loaded.
+    # loadwallet on an already-loaded wallet returns error -35; checking first
+    # avoids silently masking that (or any other real) error.
+    loaded = _run_json(_btc_base(cfg) + ["listwallets"], cfg.cmd_timeout_s)
+    already_loaded = wallet_name in (loaded.get("payload") or [])
+    if not already_loaded:
+        result = _run_json(_btc_base(cfg) + ["loadwallet", wallet_name], cfg.cmd_timeout_s)
+        if not result.get("ok"):
+            return result
     return {"ok": True, "payload": {"wallet": wallet_name, "ensured": True}}
 
 
@@ -261,14 +269,14 @@ def btc_getnewaddress(wallet: Optional[str] = None) -> Dict[str, Any]:
     return _run_text(_btc_base(cfg, wallet=effective_wallet) + ["getnewaddress"], cfg.cmd_timeout_s)
 
 
-def btc_sendtoaddress(address: str, amount_btc: str, wallet: Optional[str] = "miner") -> Dict[str, Any]:
+def btc_sendtoaddress(address: str, amount_btc: str, wallet: Optional[str] = "shared-wallet") -> Dict[str, Any]:
     """
-    Backward compatible:
-      - existing callers pass (address, amount_btc)
-      - new callers may pass wallet; default is 'miner' to avoid Core wallet -19 error
+    Send an on-chain payment from the named Bitcoin Core wallet.
+    Defaults to "shared-wallet" — the wallet created by infra_boot.sh.
+    Bitcoin Core requires -rpcwallet when multiple wallets are loaded (error -19).
     """
     cfg = load_config()
-    w = wallet if wallet is not None else "miner"
+    w = wallet if wallet is not None else "shared-wallet"
     return _run_text(_btc_base(cfg, wallet=w) + ["sendtoaddress", address, str(amount_btc)], cfg.cmd_timeout_s)
 
 
@@ -680,7 +688,7 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
             return btc_sendtoaddress(
                 str(params["address"]),
                 str(params["amount_btc"]),
-                wallet=params.get("wallet", "miner"),
+                wallet=params.get("wallet", "shared-wallet"),
             )
         if method == "btc_generatetoaddress":
             return btc_generatetoaddress(int(params["blocks"]), str(params["address"]))
