@@ -646,10 +646,11 @@ class PipelineCoordinator:
                         self.trace.archive(req_id, start_ts, arch_status)
 
                         # Update rolling history so the next prompt has context.
-                        # Store the intent's goal (concise) not the verbose summary
-                        # (which may contain raw JSON from tool results).
-                        history_summary = result.intent.goal if result.intent else result.human_summary
-                        self._update_history(user_text, history_summary)
+                        # Skip when translation failed (result.intent is None) —
+                        # storing the error message would pollute the LLM's context
+                        # and confuse subsequent queries.
+                        if result.intent:
+                            self._update_history(user_text, result.intent.goal)
 
                     elif kind == "route":
                         # Inter-agent routing: forward the payload to another
