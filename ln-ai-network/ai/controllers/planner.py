@@ -125,7 +125,9 @@ Rules:
 - CRITICAL: For recall intents (intent_type == "recall" OR goal contains phrases like
   "what did I run", "last run", "recent history", "what happened before", "past operations"):
   use memory_lookup ONLY. Args: query (keyword from user's prompt, optional), last_n
-  (default 5). Do NOT include any Bitcoin or Lightning tools. Minimal recall plan:
+  (default 5). The "outcome" arg MUST be one of "ok", "partial", or "failed" — it is NOT
+  for topic filtering. To search by topic (e.g. "payment", "channel"), use the "query" arg.
+  Do NOT include any Bitcoin or Lightning tools. Minimal recall plan:
     memory_lookup(query="<keyword>", last_n=5, on_error: "abort")
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
 - To connect two nodes as peers (ln_connect): you MUST first ensure node 2 is running
@@ -156,6 +158,15 @@ Rules:
   string). ln_pay requires bolt11=$stepN.result.payload.bolt11. Full send-payment plan:
   ln_invoice(node=<receiver>, amount_msat=<msat>, label="<unique>", description="<text>")
   → ln_pay(from_node=<sender>, bolt11=$step1.result.payload.bolt11).
+- PAYMENT RETRY STRATEGY: For payment steps (ln_pay), set on_error="retry" and max_retries=2
+  to handle transient routing failures. ln_pay accepts optional args: maxfee (max fee in msat)
+  and retry_for (seconds to keep retrying). Adjust behavior based on STRATEGY MODE if present:
+    cheap:      minimize fees — set maxfee=100, on_error="abort", max_retries=0
+    fast:       default behavior — on_error="retry", max_retries=2
+    detailed:   include extra diagnostic steps before payment (e.g. ln_listchannels, ln_listfunds
+                on sender node) to provide rich output. Use on_error="retry", max_retries=2.
+    max_effort: maximize success — set retry_for=30, on_error="retry", max_retries=4, no maxfee limit
+  If no STRATEGY MODE is specified, use "fast" defaults.
 - For cross-machine Lightning peer connectivity (user explicitly asks to make a node reachable
   FROM ANOTHER MACHINE / remote host / different computer): call sys_netinfo to get
   default_outbound_ip, then ln_node_stop + ln_node_start with bind_host="0.0.0.0" and
@@ -268,13 +279,17 @@ class Planner:
         self.backend = backend
         self.trace = trace
 
-    def plan(self, intent: IntentBlock, req_id: int) -> ExecutionPlan:
+    def plan(self, intent: IntentBlock, req_id: int, strategy: str = "") -> ExecutionPlan:
         """
         Produce an ExecutionPlan from an IntentBlock.
 
         The intent is serialized to JSON and sent as the user message.
         The LLM is asked to produce a minimal, ordered plan using only
         the available MCP tools.
+
+        strategy — one of "cheap", "fast", "detailed", "max_effort", or ""
+        (empty = use default behavior). Appended to user content so the
+        Planner LLM can adjust retry/fee parameters accordingly.
 
         Retries up to config.max_retries on parse/validation failure.
         Raises PlannerError if all attempts fail.
@@ -286,6 +301,8 @@ class Planner:
         )
         # Send the full intent as structured JSON so the LLM has all context
         user_content = json.dumps(intent.to_dict(), ensure_ascii=False, indent=2)
+        if strategy:
+            user_content += f"\n\n[STRATEGY MODE: {strategy}]"
 
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},

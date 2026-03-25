@@ -883,8 +883,13 @@ class UIHandler(BaseHTTPRequestHandler):
             if not prompt:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'text' prompt"})
                 return
-            # Enqueue with use_llm=True to trigger the full 4-stage pipeline
-            msg = enqueue(prompt, meta={"kind": "freeform", "use_llm": True})
+            # Enqueue with use_llm=True to trigger the full 4-stage pipeline.
+            # strategy (cheap/fast/detailed/max_effort) flows through to the Planner.
+            meta: dict[str, Any] = {"kind": "freeform", "use_llm": True}
+            strategy = str(data.get("strategy", "")).strip()
+            if strategy:
+                meta["strategy"] = strategy
+            msg = enqueue(prompt, meta=meta)
             self._json(HTTPStatus.OK, {"queued": "ask", "msg": msg})
 
         elif parsed.path == "/api/health":
@@ -951,6 +956,29 @@ class UIHandler(BaseHTTPRequestHandler):
                     print(f"[ERROR] Failed to launch restart sequence: {exc}", flush=True)
 
             threading.Thread(target=_do_restart, daemon=True).start()
+
+        elif parsed.path == "/api/fresh":
+            # Archive + clear all data, then restart the agent fresh.
+            # Uses restart_agent.sh with the "fresh" flag which archives
+            # inbox/outbox/history/archive.jsonl and resets cursors.
+            restart_agent = REPO_ROOT / "scripts" / "restart_agent.sh"
+            if not restart_agent.exists():
+                self._json(HTTPStatus.NOT_FOUND, {"error": "restart_agent.sh not found"})
+                return
+            self._json(HTTPStatus.OK, {"status": "fresh_restart_initiated"})
+
+            def _do_fresh() -> None:
+                time.sleep(0.5)
+                try:
+                    subprocess.Popen(
+                        ["bash", str(restart_agent), "fresh"],
+                        cwd=str(REPO_ROOT),
+                        start_new_session=True,
+                    )
+                except Exception as exc:
+                    print(f"[ERROR] Failed to launch restart_agent.sh fresh: {exc}", flush=True)
+
+            threading.Thread(target=_do_fresh, daemon=True).start()
 
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint"})

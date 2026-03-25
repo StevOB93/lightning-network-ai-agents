@@ -606,7 +606,10 @@ class Executor:
                     retries_used=attempt,  # 0 on first success, >0 if retried
                     skipped=False,
                 )
-            # If tool_err is not None and we have attempts remaining, loop continues
+            # If tool_err is not None and we have attempts remaining, wait before retrying
+            # so the network / node has time to settle (e.g. payment route congestion).
+            if attempt < max_attempts - 1:
+                time.sleep(1.5)
 
         # All attempts exhausted — return based on on_error policy
         if step.on_error == "skip":

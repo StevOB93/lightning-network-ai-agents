@@ -403,7 +403,7 @@ class PipelineCoordinator:
     # Pipeline execution
     # -------------------------------------------------------------------------
 
-    def _run_pipeline(self, req_id: int, user_text: str) -> PipelineResult:
+    def _run_pipeline(self, req_id: int, user_text: str, strategy: str = "") -> PipelineResult:
         """
         Execute the full 4-stage pipeline for a single user query.
 
@@ -464,7 +464,7 @@ class PipelineCoordinator:
         # Stage 2: Plan — IntentBlock → ordered ExecutionPlan of MCP tool calls
         _t0 = time.monotonic()
         try:
-            plan = self.planner.plan(intent, req_id)
+            plan = self.planner.plan(intent, req_id, strategy=strategy)
         except PlannerError as e:
             self.trace.log({"event": "stage_failed", "stage": "planner", "error": str(e)})
             return PipelineResult(
@@ -675,7 +675,8 @@ class PipelineCoordinator:
                             "user_text": str(msg.get("content", "")),
                         })
                         user_text = str(msg.get("content", ""))
-                        result = self._run_pipeline(req_id, user_text=user_text)
+                        strategy = str(meta.get("strategy", "")) or self._cfg.default_payment_strategy
+                        result = self._run_pipeline(req_id, user_text=user_text, strategy=strategy)
                         self._write_report(result)
 
                         # Determine archive status:

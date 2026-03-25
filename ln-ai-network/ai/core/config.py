@@ -111,6 +111,11 @@ class AgentConfig:
     circuit_breaker_after: int = 6
     circuit_breaker_open_ms: int = 60_000
 
+    # ── Payment strategy ───────────────────────────────────────────────────
+    # Default strategy when the UI doesn't send one. Options:
+    # cheap, fast, detailed, max_effort
+    default_payment_strategy: str = "fast"
+
     @staticmethod
     def from_env() -> "AgentConfig":
         """
@@ -136,4 +141,5 @@ class AgentConfig:
             backoff_jitter_ms=_env_int("LLM_BACKOFF_JITTER_MS", 250),
             circuit_breaker_after=_env_int("LLM_CIRCUIT_BREAKER_AFTER", 6),
             circuit_breaker_open_ms=_env_int("LLM_CIRCUIT_BREAKER_OPEN_MS", 60_000),
+            default_payment_strategy=os.getenv("DEFAULT_PAYMENT_STRATEGY", "fast"),
         )

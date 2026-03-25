@@ -558,10 +558,20 @@ def ln_invoice(node: Union[int, str], amount_msat: int, label: str, description:
     return _run_json(_ln_base(cfg, nd) + ["invoice", str(int(amount_msat)), effective_label, description], cfg.cmd_timeout_s)
 
 
-def ln_pay(from_node: Union[int, str], bolt11: str) -> Dict[str, Any]:
+def ln_pay(
+    from_node: Union[int, str],
+    bolt11: str,
+    maxfee: Optional[int] = None,
+    retry_for: Optional[int] = None,
+) -> Dict[str, Any]:
     cfg = load_config()
     nd = _require_node_dir(cfg, from_node)
-    return _run_json(_ln_base(cfg, nd) + ["-k", "pay", f"bolt11={bolt11}"], cfg.cmd_timeout_s)
+    cmd = _ln_base(cfg, nd) + ["-k", "pay", f"bolt11={bolt11}"]
+    if maxfee is not None:
+        cmd.append(f"maxfee={maxfee}")
+    if retry_for is not None:
+        cmd.append(f"retry_for={retry_for}")
+    return _run_json(cmd, cfg.cmd_timeout_s)
 
 
 def network_health() -> Dict[str, Any]:
@@ -796,7 +806,12 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
         if method == "ln_invoice":
             return ln_invoice(params["node"], int(params["amount_msat"]), str(params["label"]), str(params["description"]))
         if method == "ln_pay":
-            return ln_pay(params["from_node"], str(params["bolt11"]))
+            kw: Dict[str, Any] = {"from_node": params["from_node"], "bolt11": str(params["bolt11"])}
+            if "maxfee" in params:
+                kw["maxfee"] = int(params["maxfee"])
+            if "retry_for" in params:
+                kw["retry_for"] = int(params["retry_for"])
+            return ln_pay(**kw)
 
         return _error(f"Unknown method '{method}'")
 

@@ -5,12 +5,13 @@
   Structure:
     .page-shell
     ├── .status-bar          — persistent top bar: build tag, agent status, counters
-    ├── .tab-bar             — Agent / Pipeline / Network / Logs tabs
-    └── .tab-panel × 4      — only one panel visible at a time (hidden attr toggled by app.js)
+    ├── .tab-bar             — Agent / Pipeline / Network / Logs / Settings tabs
+    └── .tab-panel × 5      — only one panel visible at a time (hidden attr toggled by app.js)
         ├── #tab-agent       — prompt input, summary card
         ├── #tab-pipeline    — 3-stage cards (Translator → Planner → Executor)
         ├── #tab-network     — D3 force-directed network graph
-        └── #tab-logs        — live trace log, archive panel, inbox/outbox queues
+        ├── #tab-logs        — live trace log, archive panel, inbox/outbox queues
+        └── #tab-settings    — configuration form + danger zone
 
   JS data flow (app.js):
     SSE /api/events  → status event  → update status bar + inbox/outbox lists
@@ -58,6 +59,12 @@
           <span class="ind-label">Agent</span>
           <code class="ind-value" id="agent-lock-val">checking…</code>
         </div>
+        <!-- SSE connection indicator: shows connected/disconnected/reconnecting -->
+        <div class="indicator" id="ind-sse">
+          <span class="dot"></span>
+          <span class="ind-label">SSE</span>
+          <code class="ind-value" id="sse-status-val">connecting…</code>
+        </div>
         <!-- request_id from the most recent pipeline_result event -->
         <div class="indicator">
           <span class="ind-label">Last&nbsp;Request</span>
@@ -101,6 +108,8 @@
             placeholder="e.g. Open a 500,000 sat channel to node 02abc… then pay invoice lnbc…"
           ></textarea>
           <div class="prompt-actions">
+            <!-- Strategy mode toggle: cycles Cheap → Fast → Detailed → Max Effort -->
+            <button id="strategy-btn" class="strategy-toggle" data-strategy="fast" title="Click to cycle strategy mode">Fast</button>
             <!-- Queue Request: POST /api/ask → writes to inbox.jsonl -->
             <button id="ask-btn" class="btn-primary">
               <span class="btn-icon">▶</span> Queue Request
@@ -406,6 +415,20 @@
           </div>
 
         </div><!-- /settings-groups -->
+
+        <!-- Danger Zone — destructive operations with multi-step confirmation -->
+        <div class="danger-zone">
+          <div class="danger-zone-title">Danger Zone</div>
+          <div class="danger-zone-body">
+            <div class="danger-zone-desc">
+              <strong>Clear All Data &amp; Restart Fresh</strong>
+              <p>Archives and clears inbox, outbox, history, and trace logs, then restarts the agent. This cannot be undone.</p>
+            </div>
+            <div class="danger-zone-action" id="clear-all-action">
+              <button id="clear-all-btn" class="btn-danger-sm">Clear All Data</button>
+            </div>
+          </div>
+        </div>
 
         <div class="settings-actions">
           <button id="settings-save-btn" class="btn-primary">Save to .env</button>

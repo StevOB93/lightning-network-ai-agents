@@ -16,6 +16,8 @@ const lastRequestId  = $("last-request-id");// ID of the most recently completed
 const msgCount       = $("msg-count");      // Number of recent inbox messages shown
 const pipelineBuild  = $("pipeline-build"); // Pipeline build string from outbox
 const indAgent       = $("ind-agent");      // Online/offline indicator dot
+const indSSE         = $("ind-sse");        // SSE connection indicator dot
+const sseStatusVal   = $("sse-status-val"); // SSE status text
 
 // Pipeline stage display panels
 const intentDisplay  = $("intent-display"); // Rendered IntentBlock
@@ -58,8 +60,47 @@ let _outboxClearTs = 0;
 const networkViz   = $("network-viz");   // D3 SVG container
 const networkHint  = $("network-hint");  // "N nodes, M channels" hint text
 
+// Strategy toggle
+const strategyBtn    = $("strategy-btn");    // Cycles through strategy modes
+
 // Settings tab elements
 const settingsStatus = $("settings-status"); // Inline feedback next to save button
+
+// ---------------------------------------------------------------------------
+// Strategy mode toggle
+// ---------------------------------------------------------------------------
+// Cycles: cheap → fast → detailed → max_effort → cheap → ...
+// Persisted in localStorage so the choice survives page refresh.
+
+const _STRATEGIES = ["cheap", "fast", "detailed", "max_effort"];
+const _STRATEGY_LABELS = { cheap: "Cheap", fast: "Fast", detailed: "Detailed", max_effort: "Max Effort" };
+
+/** Return the currently selected strategy mode. */
+function getStrategy() {
+  return strategyBtn ? strategyBtn.dataset.strategy : "fast";
+}
+
+/** Advance the strategy toggle to the next mode. */
+function cycleStrategy() {
+  if (!strategyBtn) return;
+  const current = strategyBtn.dataset.strategy;
+  const idx = _STRATEGIES.indexOf(current);
+  const next = _STRATEGIES[(idx + 1) % _STRATEGIES.length];
+  strategyBtn.dataset.strategy = next;
+  strategyBtn.textContent = _STRATEGY_LABELS[next];
+  try { localStorage.setItem("ln_ai_strategy", next); } catch (_) { /* private mode */ }
+}
+
+// Restore saved strategy on load
+(function initStrategy() {
+  try {
+    const saved = localStorage.getItem("ln_ai_strategy");
+    if (saved && _STRATEGIES.includes(saved) && strategyBtn) {
+      strategyBtn.dataset.strategy = saved;
+      strategyBtn.textContent = _STRATEGY_LABELS[saved];
+    }
+  } catch (_) { /* private mode */ }
+})();
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -843,18 +884,30 @@ async function refreshAll() {
 async function queueAsk() {
   const text = promptInput.value.trim();
   if (!text) { setLog("Enter a prompt first.", true); return; }
+  const btn = $("ask-btn");
+  btn.disabled = true;
   setLog("Queuing request…");
-  const data = await postJson("/api/ask", { text });
-  setLog(`Queued request #${data.msg.id}. Waiting for agent…`);
-  await refreshAll();
+  try {
+    const data = await postJson("/api/ask", { text, strategy: getStrategy() });
+    setLog(`Queued request #${data.msg.id} [${_STRATEGY_LABELS[getStrategy()]}]. Waiting for agent…`);
+    await refreshAll();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /** Enqueue a health check and refresh all panels on completion. */
 async function queueHealth() {
+  const btn = $("health-btn");
+  btn.disabled = true;
   setLog("Queuing health check…");
-  const data = await postJson("/api/health", {});
-  setLog(`Queued health check #${data.msg.id}. Waiting for agent…`);
-  await refreshAll();
+  try {
+    const data = await postJson("/api/health", {});
+    setLog(`Queued health check #${data.msg.id}. Waiting for agent…`);
+    await refreshAll();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1056,135 @@ async function saveSettings() {
 }
 
 // ---------------------------------------------------------------------------
+// SSE indicator
+// ---------------------------------------------------------------------------
+
+function updateSSEIndicator(state) {
+  // state: "connected" | "disconnected" | "reconnecting"
+  if (indSSE) indSSE.classList.toggle("online", state === "connected");
+  if (sseStatusVal) sseStatusVal.textContent = state;
+}
+
+// ---------------------------------------------------------------------------
+// System overlay (shutdown / restart)
+// ---------------------------------------------------------------------------
+
+function showOverlay(mode) {
+  hideOverlay();
+  const overlay = document.createElement("div");
+  overlay.id = "system-overlay";
+  overlay.className = "system-overlay";
+  if (mode === "shutdown") {
+    overlay.innerHTML = `
+      <div class="overlay-content">
+        <div class="overlay-icon">&#x23FB;</div>
+        <h2>System Stopped</h2>
+        <p>The Lightning AI system has been shut down.</p>
+        <p class="overlay-hint">Close this tab or restart the server to continue.</p>
+      </div>`;
+  } else if (mode === "restarting") {
+    overlay.innerHTML = `
+      <div class="overlay-content">
+        <div class="overlay-icon spinner">&#x21BA;</div>
+        <h2>Restarting…</h2>
+        <p>The system is cycling. Reconnecting shortly.</p>
+      </div>`;
+  }
+  document.body.appendChild(overlay);
+}
+
+function hideOverlay() {
+  const existing = document.getElementById("system-overlay");
+  if (existing) existing.remove();
+}
+
+// ---------------------------------------------------------------------------
+// Clear All (multi-step confirmation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Three-step confirmation flow for the destructive "Clear All" operation.
+ *
+ * Step 0 (initial): "Clear All Data" button.
+ * Step 1: Click -> button becomes "Are you sure? Click again to confirm".
+ *           Auto-reverts after 5 seconds.
+ * Step 2: Click again -> replaced with text input + Confirm/Cancel.
+ *           User must type "CLEAR" to enable Confirm. Auto-reverts after 10s.
+ * Step 3: Final confirm -> POST /api/fresh, clear local UI state.
+ */
+let _clearStep = 0;
+let _clearTimeout = null;
+
+function resetClearAll() {
+  _clearStep = 0;
+  if (_clearTimeout) { clearTimeout(_clearTimeout); _clearTimeout = null; }
+  const action = $("clear-all-action");
+  if (!action) return;
+  action.innerHTML = '<button id="clear-all-btn" class="btn-danger-sm">Clear All Data</button>';
+  $("clear-all-btn").addEventListener("click", advanceClearAll);
+}
+
+function advanceClearAll() {
+  if (_clearTimeout) { clearTimeout(_clearTimeout); _clearTimeout = null; }
+
+  if (_clearStep === 0) {
+    _clearStep = 1;
+    const btn = $("clear-all-btn");
+    btn.textContent = "Are you sure? Click again to confirm";
+    btn.classList.add("btn-danger-sm-active");
+    _clearTimeout = setTimeout(resetClearAll, 5000);
+  } else if (_clearStep === 1) {
+    _clearStep = 2;
+    const action = $("clear-all-action");
+    action.innerHTML = `
+      <div class="clear-confirm-row">
+        <label class="clear-confirm-label">Type <code>CLEAR</code> to confirm:</label>
+        <input id="clear-confirm-input" class="settings-input clear-confirm-input"
+               type="text" placeholder="CLEAR" autocomplete="off">
+        <button id="clear-confirm-btn" class="btn-danger-sm" disabled>Confirm</button>
+        <button id="clear-cancel-btn" class="btn-ghost small">Cancel</button>
+      </div>`;
+    const input = $("clear-confirm-input");
+    const confirmBtn = $("clear-confirm-btn");
+    input.addEventListener("input", () => {
+      confirmBtn.disabled = input.value.trim() !== "CLEAR";
+    });
+    confirmBtn.addEventListener("click", executeClearAll);
+    $("clear-cancel-btn").addEventListener("click", resetClearAll);
+    input.focus();
+    _clearTimeout = setTimeout(resetClearAll, 10000);
+  }
+}
+
+async function executeClearAll() {
+  if (_clearTimeout) { clearTimeout(_clearTimeout); _clearTimeout = null; }
+  const action = $("clear-all-action");
+  action.innerHTML = '<span class="clear-status">Clearing all data…</span>';
+  try {
+    await postJson("/api/fresh", {});
+    action.innerHTML = '<span class="clear-status ok">All data cleared. Agent restarting…</span>';
+    // Clear local UI state
+    traceLog.innerHTML = '<div class="empty-state">No trace events yet.</div>';
+    _seenTraceTs.clear();
+    archiveList.innerHTML = '<div class="empty-state">No archived queries yet.</div>';
+    summaryCard.style.display = "none";
+    intentDisplay.innerHTML = '<div class="empty-state">No pipeline run yet.</div>';
+    planDisplay.innerHTML = '<div class="empty-state">No pipeline run yet.</div>';
+    execDisplay.innerHTML = '<div class="empty-state">No pipeline run yet.</div>';
+    const mc = $("metrics-content");
+    if (mc) mc.innerHTML = '<div class="empty-state">No queries yet.</div>';
+    setBadge(badgeTranslator, stageTranslator, "");
+    setBadge(badgePlanner, stagePlanner, "");
+    setBadge(badgeExecutor, stageExecutor, "");
+    setLog("System cleared. Agent restarting fresh…");
+    setTimeout(resetClearAll, 3000);
+  } catch (e) {
+    action.innerHTML = `<span class="clear-status error">Error: ${esc(e.message)}</span>`;
+    setTimeout(resetClearAll, 3000);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
 
@@ -1017,7 +1199,14 @@ async function shutdownSystem() {
   setLog("Shutting down…");
   try {
     await postJson("/api/shutdown", {});
+    _shutdownRequested = true;
     setLog("Shutdown initiated. The system is stopping…");
+    // Disable controls to prevent confused clicks after shutdown
+    $("ask-btn").disabled = true;
+    $("health-btn").disabled = true;
+    $("restart-btn").disabled = true;
+    $("shutdown-btn").disabled = true;
+    promptInput.disabled = true;
   } catch (e) {
     setLog("Shutdown request failed: " + e.message, true);
   }
@@ -1035,6 +1224,7 @@ async function restartSystem() {
   setLog("Restarting…");
   try {
     await postJson("/api/restart", {});
+    _restartRequested = true;
     setLog("Restart initiated. The system is cycling — reconnecting shortly…");
   } catch (e) {
     setLog("Restart request failed: " + e.message, true);
@@ -1044,6 +1234,7 @@ async function restartSystem() {
 // ---------------------------------------------------------------------------
 // Event listeners
 // ---------------------------------------------------------------------------
+$("strategy-btn").addEventListener("click", cycleStrategy);
 $("ask-btn").addEventListener("click",     () => queueAsk().catch(e => setLog(e.message, true)));
 $("health-btn").addEventListener("click",  () => queueHealth().catch(e => setLog(e.message, true)));
 $("refresh-btn").addEventListener("click", () => refreshAll().catch(e => setLog(e.message, true)));
@@ -1059,6 +1250,7 @@ $("settings-save-btn").addEventListener("click", () =>
     settingsStatus.className = "settings-status error";
   })
 );
+$("clear-all-btn").addEventListener("click", advanceClearAll);
 
 // Enter submits; Shift+Enter inserts a newline (default textarea behavior)
 promptInput.addEventListener("keydown", e => {
@@ -1075,6 +1267,11 @@ promptInput.addEventListener("keydown", e => {
 // Tracks whether the SSE connection is currently active.
 // The polling intervals check this flag to avoid double-fetching when SSE is working.
 let _sseActive = false;
+
+// Set by shutdownSystem() / restartSystem() after a successful POST.
+// The SSE onerror handler checks these to decide overlay vs reconnect behavior.
+let _shutdownRequested = false;
+let _restartRequested = false;
 
 /**
  * Open a Server-Sent Events connection to /api/stream.
@@ -1123,13 +1320,32 @@ function startSSE() {
     } catch (_) {}
   });
 
-  es.onopen = () => { _sseActive = true; };
+  es.onopen = () => {
+    _sseActive = true;
+    updateSSEIndicator("connected");
+    if (_restartRequested) {
+      _restartRequested = false;
+      hideOverlay();
+    }
+  };
 
   es.onerror = () => {
     _sseActive = false;
     es.close();
-    // Reconnect after 5 seconds — long enough to avoid hammering the server
-    // on repeated failures, short enough to recover quickly after a restart.
+    updateSSEIndicator("disconnected");
+
+    if (_shutdownRequested) {
+      // Server is gone permanently — show overlay, don't reconnect.
+      try { window.close(); } catch (_) {}
+      showOverlay("shutdown");
+      return;
+    }
+
+    if (_restartRequested) {
+      showOverlay("restarting");
+    }
+
+    updateSSEIndicator("reconnecting");
     setTimeout(startSSE, 5000);
   };
 
@@ -1179,6 +1395,7 @@ function startTokenSSE() {
 
   es.onerror = () => {
     es.close();
+    if (_shutdownRequested) return;  // Don't reconnect after shutdown
     setTimeout(startTokenSSE, 5000);
   };
 }
@@ -1230,13 +1447,13 @@ startTokenSSE();
 
 // Polling fallback intervals — only fire when SSE is not delivering updates.
 // This handles browsers that don't support EventSource or networks that block SSE.
-setInterval(() => { if (!_sseActive) fetchStatus().catch(() => {}); }, 3000);
-setInterval(() => { if (!_sseActive) fetchPipelineResult().catch(() => {}); }, 4000);
-setInterval(() => { if (!_sseActive) fetchTrace().catch(() => {}); }, 3000);
+setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchStatus().catch(() => {}); }, 3000);
+setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchPipelineResult().catch(() => {}); }, 4000);
+setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchTrace().catch(() => {}); }, 3000);
 
 // Network graph always polls independently — it's infrequent (15s) and not
 // pushed via SSE because network topology rarely changes mid-session.
-setInterval(() => fetchNetwork().catch(() => {}), 15000);
+setInterval(() => { if (!_shutdownRequested) fetchNetwork().catch(() => {}); }, 15000);
 
 // ---------------------------------------------------------------------------
 // Copy buttons (global delegated listener)
