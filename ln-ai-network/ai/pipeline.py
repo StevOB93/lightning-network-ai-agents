@@ -250,6 +250,15 @@ class PipelineCoordinator:
         assistant turn. This keeps the history compact and avoids injecting raw
         tool output JSON into subsequent prompts.
         """
+        # Deduplicate: if the last exchange in history is identical (same user text
+        # AND same assistant goal), skip — repeated identical prompts (e.g. 10x demo
+        # runs of the same command) would otherwise dominate the context window and
+        # cause the translator to drift toward that old intent on unrelated prompts.
+        if (len(self._history) >= 2
+                and self._history[-2].get("content") == user_text
+                and self._history[-1].get("content") == assistant_summary):
+            return  # identical to last entry — no new information
+
         new_msgs = [
             {"role": "user",      "content": user_text},
             {"role": "assistant", "content": assistant_summary},
