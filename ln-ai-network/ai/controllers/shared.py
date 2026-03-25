@@ -141,8 +141,14 @@ def _repair_json(text: str) -> str:
     text = re.sub(r'\b(\d+)\s*([*+\-/])\s*(\d+)\b', _eval_arith, text)
     # Remove trailing commas before } or ]
     text = re.sub(r',\s*([}\]])', r'\1', text)
-    # Replace single quotes with double quotes (simple cases only)
-    text = re.sub(r"(?<![\"\\])'([^']*)'", r'"\1"', text)
+    # Replace single quotes with double quotes — but only when the closing quote
+    # is followed by a JSON structural character (`,` `}` `]` or whitespace then
+    # one of those). This prevents replacing embedded natural-language apostrophes
+    # or quotes inside an already-valid double-quoted JSON string such as:
+    #   "expected_outcome": "status is 'ok' and nodes are running"
+    # Without the lookahead that `'ok'` would become `"ok"`, injecting an
+    # unescaped double-quote into the middle of the string and breaking JSON.
+    text = re.sub(r"(?<![\"\\])'([^']*)'(?=\s*[,\}\]])", r'"\1"', text)
     # Fix missing commas between adjacent string values (array elements or object values).
     # Uses \s+ (not \s*\n) so it catches both newline-separated and same-line cases,
     # e.g. "foo" "bar" or "foo"\n"bar" → "foo",\n"bar"

@@ -111,10 +111,13 @@ Rules:
   blockchain info in a single call. Do not call ln_node_status for each node separately.
   network_health result fields: $stepN.result.payload.status ("ok"|"degraded"|"down"),
   $stepN.result.payload.nodes (list), $stepN.result.payload.summary.nodes_running.
-- For diagnostic/health-check intents (phrases like "run a diagnostic", "run a test",
-  "check status", "check health"): use network_health (and optionally ln_listfunds) ONLY.
-  Do NOT include ln_connect or ln_openchannel unless the intent explicitly asks to connect
-  nodes or open channels.
+- CRITICAL: For diagnostic/health-check intents (goal contains phrases like "run a
+  diagnostic", "run a test", "check status", "check health", "health check"): use
+  network_health (and optionally ln_listfunds) ONLY — even if success_criteria list
+  "channel_opened" or "payment_sent". Those criteria are translator artifacts; ignore them
+  and produce a 1-2 step health-check plan. Do NOT include ln_connect, ln_openchannel,
+  ln_invoice, or ln_pay unless the goal EXPLICITLY mentions connecting, opening channels,
+  or sending a payment.
 - For balance queries, use "ln_listfunds" to get on-chain and channel balances.
 - To connect two nodes as peers (ln_connect): you MUST first ensure node 2 is running
   (ln_node_status → ln_node_start if needed), then call ln_getinfo(node=2) to get the
