@@ -1444,6 +1444,60 @@ button:active { transform: translateY(0); }
   border-radius: 50%;
 }
 
+/* Collapsible section toggle (per-stage overrides) */
+.collapsible-toggle {
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.collapsible-toggle:hover { color: var(--fg); }
+.collapse-arrow {
+  font-size: 0.65rem;
+  transition: transform 0.15s;
+}
+
+.collapsible-body {
+  margin-top: 12px;
+}
+
+.settings-hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0 0 12px 0;
+}
+
+/* Per-stage override grid: label | backend dropdown | model dropdown */
+.stage-override-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stage-override-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.stage-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+.stage-model:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* Secondary action button (restart agent) */
 .btn-secondary {
   padding: 7px 16px;

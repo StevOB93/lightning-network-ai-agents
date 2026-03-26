@@ -1187,6 +1187,100 @@ function updateApiKeyVisibility(backend) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Per-stage LLM override helpers
+// ---------------------------------------------------------------------------
+
+// Maps backend value → the env var name pattern for the stage-specific model key.
+// E.g. role="TRANSLATOR", backend="openai" → "TRANSLATOR_OPENAI_MODEL"
+const _STAGE_MODEL_KEY = (role, backend) =>
+  `${role}_${backend.toUpperCase()}_MODEL`;
+
+/**
+ * Populate a per-stage model dropdown based on the selected backend for that stage.
+ * If backend is "" (global default), clear the dropdown and disable it.
+ */
+function populateStageModelDropdown(role, backend, currentValue) {
+  const modelSelect = document.querySelector(`.stage-model[data-role="${role}"]`);
+  if (!modelSelect) return;
+
+  modelSelect.innerHTML = "";
+
+  if (!backend) {
+    // Global default — no model override
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(uses global model)";
+    modelSelect.appendChild(opt);
+    modelSelect.disabled = true;
+    return;
+  }
+
+  modelSelect.disabled = false;
+  const entry = _LLM_MODELS[backend] || _LLM_MODELS.openai;
+
+  let matched = false;
+  for (const m of entry.models) {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    opt.textContent = m.label;
+    if (currentValue === m.value) { opt.selected = true; matched = true; }
+    modelSelect.appendChild(opt);
+  }
+
+  // If current value is a custom model not in the list, insert it
+  if (currentValue && !matched) {
+    const customEntry = document.createElement("option");
+    customEntry.value = currentValue;
+    customEntry.textContent = `${currentValue} (custom)`;
+    customEntry.selected = true;
+    modelSelect.insertBefore(customEntry, modelSelect.firstChild);
+  }
+}
+
+/**
+ * Load per-stage overrides from config data into the stage override rows.
+ */
+function loadStageOverrides(configData) {
+  document.querySelectorAll(".stage-override-row").forEach(row => {
+    const role = row.dataset.role;
+    const backendSelect = row.querySelector(".stage-backend");
+    const backendVal = configData[`${role}_LLM_BACKEND`] || "";
+    if (backendSelect) backendSelect.value = backendVal;
+
+    // Determine model key based on selected backend
+    const effectiveBackend = backendVal || "";
+    let currentModel = "";
+    if (effectiveBackend) {
+      currentModel = configData[_STAGE_MODEL_KEY(role, effectiveBackend)] || "";
+    }
+    populateStageModelDropdown(role, effectiveBackend, currentModel);
+  });
+}
+
+/**
+ * Collect per-stage override values for saving.
+ * Returns an object of env key → value pairs.
+ */
+function collectStageOverrides() {
+  const updates = {};
+  document.querySelectorAll(".stage-override-row").forEach(row => {
+    const role = row.dataset.role;
+    const backendSelect = row.querySelector(".stage-backend");
+    const modelSelect = row.querySelector(".stage-model");
+    const backendVal = backendSelect ? backendSelect.value : "";
+
+    // Always include the backend key (empty string clears the override)
+    updates[`${role}_LLM_BACKEND`] = backendVal;
+
+    // Include model key only when a specific backend is selected
+    if (backendVal && modelSelect && modelSelect.value) {
+      updates[_STAGE_MODEL_KEY(role, backendVal)] = modelSelect.value;
+    }
+  });
+  return updates;
+}
+
 /**
  * Handle model dropdown change — if "Custom…" is selected, prompt for input.
  */
@@ -1256,6 +1350,9 @@ async function loadSettings() {
       }
     }
 
+    // Load per-stage LLM overrides
+    loadStageOverrides(data);
+
     // Update attention indicator on Settings tab
     updateSettingsAttention(data);
   } catch (_) {
@@ -1287,6 +1384,9 @@ async function saveSettings() {
   if (modelSelect && modelSelect.value && modelSelect.value !== "__custom__") {
     updates[_activeModelEnvKey] = modelSelect.value;
   }
+
+  // Include per-stage LLM override selections
+  Object.assign(updates, collectStageOverrides());
 
   const data = await postJson("/api/config", updates);
   settingsStatus.textContent = `Saved: ${(data.saved || []).join(", ") || "nothing changed"}`;
@@ -1550,6 +1650,28 @@ $("cfg-llm-model").addEventListener("change", onModelChange);
 
 // Initialize model dropdown on page load (default to openai until settings load)
 populateModelDropdown($("cfg-llm-backend").value, "");
+
+// Collapsible toggle for per-stage overrides section
+$("stage-overrides-toggle").addEventListener("click", () => {
+  const body = $("stage-overrides-body");
+  const arrow = document.querySelector(".collapse-arrow");
+  const open = !body.hidden;
+  body.hidden = open;
+  if (arrow) arrow.textContent = open ? "\u25B6" : "\u25BC"; // ▶ / ▼
+});
+
+// Per-stage backend dropdowns → repopulate model list when backend changes
+document.querySelectorAll(".stage-backend").forEach(sel => {
+  sel.addEventListener("change", () => {
+    const role = sel.closest(".stage-override-row").dataset.role;
+    populateStageModelDropdown(role, sel.value, "");
+  });
+});
+
+// Initialize per-stage model dropdowns (all disabled until settings load)
+document.querySelectorAll(".stage-override-row").forEach(row => {
+  populateStageModelDropdown(row.dataset.role, "", "");
+});
 
 // Restart Agent button
 $("restart-agent-btn").addEventListener("click", () =>

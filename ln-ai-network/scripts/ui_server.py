@@ -35,6 +35,7 @@ RUNTIME_DIR = REPO_ROOT / "runtime" / "agent"
 ENV_FILE = REPO_ROOT / ".env"
 
 # Config keys that may be read/written via /api/config.
+_PIPELINE_ROLES = ("TRANSLATOR", "PLANNER", "EXECUTOR", "SUMMARIZER")
 _CONFIG_KEYS: frozenset[str] = frozenset({
     "LLM_BACKEND",
     "OPENAI_MODEL",
@@ -53,6 +54,11 @@ _CONFIG_KEYS: frozenset[str] = frozenset({
     "REGTEST_TARGET_HEIGHT",
     "UI_HOST",
     "UI_PORT",
+    # Per-stage LLM backend overrides (e.g. TRANSLATOR_LLM_BACKEND=gemini)
+    *(f"{r}_LLM_BACKEND" for r in _PIPELINE_ROLES),
+    # Per-stage model overrides (e.g. TRANSLATOR_OPENAI_MODEL=gpt-4o-mini)
+    *(f"{r}_{b}_MODEL" for r in _PIPELINE_ROLES
+      for b in ("OPENAI", "OLLAMA", "GEMINI", "CLAUDE")),
 })
 
 # API key env vars — returned masked (never exposed in full via the HTTP API).

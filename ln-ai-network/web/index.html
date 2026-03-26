@@ -388,6 +388,62 @@
             </div>
           </div>
 
+          <!-- Per-Stage LLM Overrides (collapsible) -->
+          <div class="settings-group stage-overrides-group">
+            <button type="button" class="settings-group-title collapsible-toggle" id="stage-overrides-toggle">
+              Advanced: Per-Stage Overrides <span class="collapse-arrow">&#9654;</span>
+            </button>
+            <div class="collapsible-body" id="stage-overrides-body" hidden>
+              <p class="settings-hint">Override the global LLM backend and model for individual pipeline stages. Leave on "Global default" to use the main backend above.</p>
+              <div class="stage-override-grid">
+                <div class="stage-override-row" data-role="TRANSLATOR">
+                  <span class="stage-label">Translator</span>
+                  <select class="settings-select stage-backend" data-key="TRANSLATOR_LLM_BACKEND">
+                    <option value="">Global default</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                  <select class="settings-select stage-model" data-role="TRANSLATOR"></select>
+                </div>
+                <div class="stage-override-row" data-role="PLANNER">
+                  <span class="stage-label">Planner</span>
+                  <select class="settings-select stage-backend" data-key="PLANNER_LLM_BACKEND">
+                    <option value="">Global default</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                  <select class="settings-select stage-model" data-role="PLANNER"></select>
+                </div>
+                <div class="stage-override-row" data-role="EXECUTOR">
+                  <span class="stage-label">Executor</span>
+                  <select class="settings-select stage-backend" data-key="EXECUTOR_LLM_BACKEND">
+                    <option value="">Global default</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                  <select class="settings-select stage-model" data-role="EXECUTOR"></select>
+                </div>
+                <div class="stage-override-row" data-role="SUMMARIZER">
+                  <span class="stage-label">Summarizer</span>
+                  <select class="settings-select stage-backend" data-key="SUMMARIZER_LLM_BACKEND">
+                    <option value="">Global default</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                  <select class="settings-select stage-model" data-role="SUMMARIZER"></select>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Timeouts -->
           <div class="settings-group">
             <div class="settings-group-title">Timeouts</div>
