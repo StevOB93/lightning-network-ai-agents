@@ -26,6 +26,12 @@ export NETWORK="${NETWORK:-regtest}"
 export LN_RUNTIME="$RUNTIME_DIR"
 export BITCOIN_RPC_USER="${BITCOIN_RPC_USER:-lnrpc}"
 export BITCOIN_RPC_PASSWORD="${BITCOIN_RPC_PASSWORD:-lnrpcpass}"
+export BITCOIN_RPC_HOST="${BITCOIN_RPC_HOST:-127.0.0.1}"
+
+# Regtest funding defaults (override in .env if desired)
+export CONF_BLOCKS="${CONF_BLOCKS:-6}"                     # blocks to mine for confirmations
+export CHANNEL_FUNDING_SAT="${CHANNEL_FUNDING_SAT:-1000000}" # satoshis per channel open
+export NODE_FUNDING_BTC="${NODE_FUNDING_BTC:-10}"           # BTC to fund node-1 at boot
 
 # Lightning node bind and announce addresses — controls cross-machine peer connectivity.
 #

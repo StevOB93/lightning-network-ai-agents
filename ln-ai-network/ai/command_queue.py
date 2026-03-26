@@ -218,7 +218,14 @@ def read_new() -> List[Dict[str, Any]]:
         return []
 
     msgs: List[Dict[str, Any]] = []
-    for ln in data.splitlines():
+    consumed_bytes = 0
+    for ln in data.splitlines(keepends=True):
+        # Only advance past lines that end with a newline (complete writes).
+        # A partial line at EOF (no trailing newline) means a concurrent write
+        # is in progress — leave it for the next read.
+        if not ln.endswith(b"\n"):
+            break
+        consumed_bytes += len(ln)
         try:
             obj = json.loads(ln.decode("utf-8"))
             if isinstance(obj, dict):
@@ -226,8 +233,9 @@ def read_new() -> List[Dict[str, Any]]:
         except Exception:
             continue  # Skip malformed lines deterministically
 
-    # Advance the cursor by exactly the number of bytes read
-    qp.offset.write_text(str(offset + len(data)), encoding="utf-8")
+    # Advance the cursor only past fully consumed (newline-terminated) lines
+    if consumed_bytes > 0:
+        qp.offset.write_text(str(offset + consumed_bytes), encoding="utf-8")
     return msgs
 
 

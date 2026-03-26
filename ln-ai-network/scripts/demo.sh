@@ -126,8 +126,8 @@ if [[ "$SKIP_SETUP" == "false" ]]; then
 
   # Infra boot only starts node-1. Start nodes 2..N so network_test.sh can
   # fund them, connect them, and open channels.
-  RPC_USER="lnrpc"
-  RPC_PASS="lnrpcpass"
+  RPC_USER="${BITCOIN_RPC_USER:-lnrpc}"
+  RPC_PASS="${BITCOIN_RPC_PASSWORD:-lnrpcpass}"
   for i in $(seq 2 "$NODE_COUNT"); do
     NODE_DIR="$LIGHTNING_BASE/node-$i"
     if lightning-cli --network=regtest --lightning-dir="$NODE_DIR" getinfo >/dev/null 2>&1; then
@@ -170,7 +170,12 @@ RESPONSE="$(curl -sf -X POST "${UI_URL}/api/ask" \
   -H "Content-Type: application/json" \
   -d "$(printf '{"text": %s}' "$(echo "$PROMPT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')")")"
 
-MSG_ID="$(echo "$RESPONSE" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["msg"]["id"])')"
+MSG_ID="$(echo "$RESPONSE" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["msg"]["id"])' 2>/dev/null)"
+if [[ -z "$MSG_ID" ]]; then
+  echo "[FATAL] Failed to submit prompt — no message ID returned."
+  echo "[FATAL] Response was: $RESPONSE"
+  exit 1
+fi
 ok "Prompt queued (message ID: $MSG_ID)"
 
 # Try to open the browser so the user can watch live
@@ -200,7 +205,7 @@ import json, sys
 try:
     data = json.loads(sys.stdin.read())
     r = data.get('result') or {}
-    if r.get('request_id') == $MSG_ID:
+    if str(r.get('request_id')) == '$MSG_ID':
         print('yes')
     else:
         print('no')

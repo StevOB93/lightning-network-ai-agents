@@ -89,11 +89,18 @@ if ! bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
     -server=1 \
     -daemon
 
+  WAIT_SECS=0
+  MAX_WAIT=60
   until bitcoin-cli -regtest -datadir="$BITCOIN_DIR" \
     -rpcport="$BITCOIN_RPC_PORT" \
     -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
     getblockchaininfo >/dev/null 2>&1; do
     sleep 1
+    WAIT_SECS=$((WAIT_SECS + 1))
+    if [[ $WAIT_SECS -ge $MAX_WAIT ]]; then
+      echo "[FATAL] bitcoind RPC not ready after ${MAX_WAIT}s — aborting"
+      exit 1
+    fi
   done
 fi
 
@@ -169,7 +176,7 @@ if ! have_cmd lightningd || ! have_cmd lightning-cli; then
 fi
 
 NODE1_DIR="$LIGHTNING_BASE/node-1"
-NODE1_PORT=$((LIGHTNING_BASE_PORT + 1 - 1))
+NODE1_PORT="$LIGHTNING_BASE_PORT"
 NODE1_LOG="$NODE1_DIR/lightningd.log"
 
 if ! lightning-cli --network=regtest --lightning-dir="$NODE1_DIR" getinfo >/dev/null 2>&1; then
@@ -217,21 +224,21 @@ echo "[INFRA] node-1 ready."
 # ── FUND NODE-1 LIGHTNING WALLET ──────────────────────────────────────────────
 # infra_boot mines blocks to the Bitcoin Core wallet but leaves the Lightning
 # wallet empty. Fund it now so the agent can open channels immediately.
-echo "[INFRA] Funding node-1 Lightning wallet (10 BTC)..."
+echo "[INFRA] Funding node-1 Lightning wallet (${NODE_FUNDING_BTC} BTC)..."
 NODE1_ADDR=$(lightning-cli --network=regtest --lightning-dir="$LIGHTNING_BASE/node-1" newaddr | jq -r '.bech32')
 MINER_ADDR=$(bitcoin-cli -regtest \
-  -rpcconnect=127.0.0.1 -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcconnect="${BITCOIN_RPC_HOST:-127.0.0.1}" -rpcport="$BITCOIN_RPC_PORT" \
   -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
   -rpcwallet="$WALLET_NAME" getnewaddress)
 bitcoin-cli -regtest \
-  -rpcconnect=127.0.0.1 -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcconnect="${BITCOIN_RPC_HOST:-127.0.0.1}" -rpcport="$BITCOIN_RPC_PORT" \
   -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-  -rpcwallet="$WALLET_NAME" sendtoaddress "$NODE1_ADDR" 10 >/dev/null
+  -rpcwallet="$WALLET_NAME" sendtoaddress "$NODE1_ADDR" "$NODE_FUNDING_BTC" >/dev/null
 bitcoin-cli -regtest \
-  -rpcconnect=127.0.0.1 -rpcport="$BITCOIN_RPC_PORT" \
+  -rpcconnect="${BITCOIN_RPC_HOST:-127.0.0.1}" -rpcport="$BITCOIN_RPC_PORT" \
   -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" \
-  generatetoaddress 6 "$MINER_ADDR" >/dev/null
-echo "[INFRA] Node-1 Lightning wallet funded (10 BTC confirmed)."
+  generatetoaddress "$CONF_BLOCKS" "$MINER_ADDR" >/dev/null
+echo "[INFRA] Node-1 Lightning wallet funded (${NODE_FUNDING_BTC} BTC confirmed)."
 
 echo "[INFRA] Infrastructure ready."
 echo "[INFRA] Note: nodes 2..$NODE_COUNT are NOT started here."

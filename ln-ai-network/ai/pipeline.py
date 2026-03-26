@@ -219,17 +219,29 @@ class PipelineCoordinator:
             # another process is simultaneously appending.
             if len(all_parsed) > len(history):
                 try:
-                    with self._history_path.open("w", encoding="utf-8") as fh:
-                        if _fcntl is not None:
-                            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
-                        try:
+                    # Atomic compaction: write to a temp file, fsync, then rename.
+                    # This avoids truncating the original before the new data is
+                    # safely on disk — a crash mid-write won't lose history.
+                    import tempfile
+                    tmp_fd, tmp_path = tempfile.mkstemp(
+                        dir=str(self._history_path.parent),
+                        prefix=".history_compact_",
+                        suffix=".tmp",
+                    )
+                    try:
+                        with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_fh:
                             for msg in history:
-                                fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
-                            fh.flush()
-                            os.fsync(fh.fileno())  # Flush OS buffer to disk
-                        finally:
-                            if _fcntl is not None:
-                                _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                                tmp_fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                            tmp_fh.flush()
+                            os.fsync(tmp_fh.fileno())
+                        os.replace(tmp_path, str(self._history_path))
+                    except Exception:
+                        # Clean up the temp file on failure
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                        raise
                 except Exception:
                     pass  # Compaction failure is non-fatal — history is correct in memory
 

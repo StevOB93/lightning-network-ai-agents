@@ -111,6 +111,13 @@ class AgentConfig:
     circuit_breaker_after: int = 6
     circuit_breaker_open_ms: int = 60_000
 
+    # ── Executor ────────────────────────────────────────────────────────────
+    # Delay between retries when a tool call fails (e.g. payment route congestion).
+    executor_retry_delay_s: float = 1.5
+
+    # Default node count when runtime/node_count file is absent or unreadable.
+    default_node_count: int = 2
+
     # ── Payment strategy ───────────────────────────────────────────────────
     # Default strategy when the UI doesn't send one. Options:
     # cheap, fast, detailed, max_effort
@@ -141,5 +148,7 @@ class AgentConfig:
             backoff_jitter_ms=_env_int("LLM_BACKOFF_JITTER_MS", 250),
             circuit_breaker_after=_env_int("LLM_CIRCUIT_BREAKER_AFTER", 6),
             circuit_breaker_open_ms=_env_int("LLM_CIRCUIT_BREAKER_OPEN_MS", 60_000),
+            executor_retry_delay_s=_env_float("EXECUTOR_RETRY_DELAY_S", 1.5),
+            default_node_count=_env_int("DEFAULT_NODE_COUNT", 2),
             default_payment_strategy=os.getenv("DEFAULT_PAYMENT_STRATEGY", "fast"),
         )

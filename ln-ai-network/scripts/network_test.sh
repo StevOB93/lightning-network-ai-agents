@@ -55,8 +55,8 @@ command -v jq >/dev/null 2>&1 || { echo "[FATAL] jq not found"; exit 127; }
 # ------------------------------------------------------------------------------
 # Bitcoin RPC settings (MUST match scripts/startup/0.1.infra_boot.sh)
 # ------------------------------------------------------------------------------
-RPC_USER="lnrpc"
-RPC_PASS="lnrpcpass"
+RPC_USER="${BITCOIN_RPC_USER:-lnrpc}"
+RPC_PASS="${BITCOIN_RPC_PASSWORD:-lnrpcpass}"
 
 # env.sh should provide BITCOIN_DIR and BITCOIN_RPC_PORT; enforce it
 : "${BITCOIN_DIR:?env.sh must set BITCOIN_DIR}"
@@ -91,12 +91,14 @@ BTC loadwallet "$WALLET_NAME" >/dev/null 2>&1 || true
 # ------------------------------------------------------------------------------
 # ENSURE BLOCKCHAIN HEIGHT
 # ------------------------------------------------------------------------------
+TARGET_HEIGHT="${REGTEST_TARGET_HEIGHT:-1200}"
 BLOCKS="$(BTC getblockcount)"
 
-if [[ "$BLOCKS" -lt 1000 ]]; then
-  echo "[INFO] Mining initial 1000 blocks (current height: $BLOCKS)..."
+if [[ "$BLOCKS" -lt "$TARGET_HEIGHT" ]]; then
+  MINE=$((TARGET_HEIGHT - BLOCKS))
+  echo "[INFO] Mining $MINE blocks to reach height $TARGET_HEIGHT (current: $BLOCKS)..."
   ADDR="$(BTC -rpcwallet="$WALLET_NAME" getnewaddress)"
-  BTC generatetoaddress 1000 "$ADDR" >/dev/null
+  BTC generatetoaddress "$MINE" "$ADDR" >/dev/null
 fi
 
 # ------------------------------------------------------------------------------
@@ -104,11 +106,18 @@ fi
 # ------------------------------------------------------------------------------
 echo "[INFO] Waiting for Lightning RPC readiness..."
 
+MAX_WAIT=60
 for i in $(seq 1 "$NODE_COUNT"); do
   NODE_DIR="$LIGHTNING_BASE/node-$i"
   echo "[INFO]  - waiting: node-$i ($NODE_DIR)"
+  WAIT_SECS=0
   until lightning-cli --network=regtest --lightning-dir="$NODE_DIR" getinfo >/dev/null 2>&1; do
     sleep 1
+    WAIT_SECS=$((WAIT_SECS + 1))
+    if [[ $WAIT_SECS -ge $MAX_WAIT ]]; then
+      echo "[FATAL] node-$i Lightning RPC not ready after ${MAX_WAIT}s — aborting"
+      exit 1
+    fi
   done
 done
 
@@ -121,6 +130,10 @@ declare -A NODE_IDS
 for i in $(seq 1 "$NODE_COUNT"); do
   NODE_DIR="$LIGHTNING_BASE/node-$i"
   NODE_IDS["$i"]="$(lightning-cli --network=regtest --lightning-dir="$NODE_DIR" getinfo | jq -r '.id')"
+  if [[ -z "${NODE_IDS[$i]}" || "${NODE_IDS[$i]}" == "null" ]]; then
+    echo "[FATAL] Failed to get node ID for node-$i — is lightningd running?"
+    exit 1
+  fi
 done
 
 # ------------------------------------------------------------------------------
@@ -136,7 +149,7 @@ done
 
 # Confirm funding
 MINER_ADDR="$(BTC -rpcwallet="$WALLET_NAME" getnewaddress)"
-BTC generatetoaddress 6 "$MINER_ADDR" >/dev/null
+BTC generatetoaddress "${CONF_BLOCKS:-6}" "$MINER_ADDR" >/dev/null
 
 # ------------------------------------------------------------------------------
 # CONNECT NODES (LINEAR TOPOLOGY)
@@ -146,10 +159,10 @@ echo "[INFO] Connecting peers..."
 
 for i in $(seq 1 $((NODE_COUNT - 1))); do
   TARGET=$((i + 1))
-  PORT=$((9735 + TARGET - 1))
+  PORT=$((LIGHTNING_BASE_PORT + TARGET - 1))
 
   lightning-cli --network=regtest --lightning-dir="$LIGHTNING_BASE/node-$i" connect \
-    "${NODE_IDS[$TARGET]}" 127.0.0.1 "$PORT" >/dev/null
+    "${NODE_IDS[$TARGET]}" 127.0.0.1 "$PORT" >/dev/null 2>&1 || true
 done
 
 # ------------------------------------------------------------------------------
@@ -175,36 +188,60 @@ for i in $(seq 1 $((NODE_COUNT - 1))); do
 done
 
 # ------------------------------------------------------------------------------
-# OPEN CHANNELS
+# OPEN CHANNELS (idempotent — skips if a CHANNELD_NORMAL channel already exists)
 # ------------------------------------------------------------------------------
 echo "[INFO] Opening channels..."
 
+NEED_MINING=false
 for i in $(seq 1 $((NODE_COUNT - 1))); do
   TARGET=$((i + 1))
   NODE_DIR="$LIGHTNING_BASE/node-$i"
+  TARGET_ID="${NODE_IDS[$TARGET]}"
 
+  # Check if a usable channel already exists with this peer
+  EXISTING="$(
+    lightning-cli --network=regtest --lightning-dir="$NODE_DIR" listpeers \
+      | jq -r --arg pid "$TARGET_ID" \
+        '[.peers[] | select(.id == $pid) | .channels[] | select(.state == "CHANNELD_NORMAL")] | length' \
+      2>/dev/null || echo "0"
+  )"
+
+  if [[ "$EXISTING" -ge 1 ]]; then
+    echo "[INFO] Channel node-$i <-> node-$TARGET already exists (CHANNELD_NORMAL), skipping"
+    continue
+  fi
+
+  echo "[INFO] Opening channel node-$i -> node-$TARGET..."
   lightning-cli --network=regtest --lightning-dir="$NODE_DIR" fundchannel \
-    "${NODE_IDS[$TARGET]}" 1000000 >/dev/null
+    "${NODE_IDS[$TARGET]}" "${CHANNEL_FUNDING_SAT:-1000000}" >/dev/null
+  NEED_MINING=true
 done
 
-# Mine confirmation blocks
-BTC generatetoaddress 6 "$MINER_ADDR" >/dev/null
+# Mine confirmation blocks (only if we opened new channels)
+if [[ "$NEED_MINING" == "true" ]]; then
+  BTC generatetoaddress "${CONF_BLOCKS:-6}" "$MINER_ADDR" >/dev/null
+fi
 
 # ------------------------------------------------------------------------------
-# WAIT FOR CHANNELD_NORMAL
+# WAIT FOR CHANNELD_NORMAL (query by target peer ID, not array index)
 # ------------------------------------------------------------------------------
 echo "[INFO] Waiting for CHANNELD_NORMAL..."
 
 for i in $(seq 1 $((NODE_COUNT - 1))); do
+  TARGET=$((i + 1))
   NODE_DIR="$LIGHTNING_BASE/node-$i"
+  TARGET_ID="${NODE_IDS[$TARGET]}"
 
   while true; do
-    STATE="$(
+    NORMAL_COUNT="$(
       lightning-cli --network=regtest --lightning-dir="$NODE_DIR" listpeers \
-        | jq -r ".peers[0].channels[0].state"
+        | jq -r --arg pid "$TARGET_ID" \
+          '[.peers[] | select(.id == $pid) | .channels[] | select(.state == "CHANNELD_NORMAL")] | length' \
+        2>/dev/null || echo "0"
     )"
 
-    if [[ "$STATE" == "CHANNELD_NORMAL" ]]; then
+    if [[ "$NORMAL_COUNT" -ge 1 ]]; then
+      echo "[INFO] node-$i <-> node-$TARGET: CHANNELD_NORMAL"
       break
     fi
 

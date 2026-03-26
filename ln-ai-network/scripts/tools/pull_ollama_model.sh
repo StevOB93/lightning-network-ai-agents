@@ -99,14 +99,15 @@ echo "[INFO] This may take a while depending on your internet speed and model si
 echo
 
 # Start Ollama server in background if not already running
-if ! curl -sf http://127.0.0.1:11434/ >/dev/null 2>&1; then
+OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
+if ! curl -sf "${OLLAMA_BASE_URL}/" >/dev/null 2>&1; then
   echo "[INFO] Starting Ollama server in background..."
   ollama serve &
   OLLAMA_PID=$!
   # Wait for it to be ready (up to 15s)
   for i in $(seq 1 15); do
     sleep 1
-    if curl -sf http://127.0.0.1:11434/ >/dev/null 2>&1; then
+    if curl -sf "${OLLAMA_BASE_URL}/" >/dev/null 2>&1; then
       break
     fi
   done

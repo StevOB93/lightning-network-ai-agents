@@ -57,12 +57,19 @@ class ExecutorConfig:
     """
     default_on_error: str = "abort"
     max_workers: int = 1
+    retry_delay_s: float = 1.5
 
     @staticmethod
     def from_env() -> ExecutorConfig:
+        v = os.getenv("EXECUTOR_RETRY_DELAY_S")
+        try:
+            retry_delay = float(v) if v else 1.5
+        except (ValueError, TypeError):
+            retry_delay = 1.5
         return ExecutorConfig(
             default_on_error=os.getenv("EXECUTOR_DEFAULT_ON_ERROR", "abort"),
             max_workers=_env_int("EXECUTOR_MAX_WORKERS", 1),
+            retry_delay_s=retry_delay,
         )
 
 
@@ -609,7 +616,7 @@ class Executor:
             # If tool_err is not None and we have attempts remaining, wait before retrying
             # so the network / node has time to settle (e.g. payment route congestion).
             if attempt < max_attempts - 1:
-                time.sleep(1.5)
+                time.sleep(self.config.retry_delay_s)
 
         # All attempts exhausted — return based on on_error policy
         if step.on_error == "skip":

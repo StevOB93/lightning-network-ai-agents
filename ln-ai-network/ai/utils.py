@@ -98,7 +98,8 @@ class StartupLock:
                         except PermissionError:
                             pass  # process exists but owned by another user
                     if stale:
-                        # Clear the stale lock file and block until we own it
+                        # Clear the stale lock file and try to own it (non-blocking
+                        # so two concurrent stealers don't deadlock each other).
                         print(
                             f"[StartupLock] stale lock detected (pid not running); "
                             f"stealing: {self.lock_path}",
@@ -107,7 +108,11 @@ class StartupLock:
                         fh.seek(0)
                         fh.truncate()
                         fh.flush()
-                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                        try:
+                            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            msg = "Another process stole the stale lock first."
+                            raise RuntimeError(msg)
                     else:
                         msg = existing or f"Another {self._name} instance holds the lock."
                         raise RuntimeError(msg)

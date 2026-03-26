@@ -40,6 +40,7 @@
   --shadow:      0 4px 24px rgba(0,0,0,0.5);
   --radius:      16px;
   --radius-sm:   10px;
+  --radius-pill: 999px;
 }
 
 * { box-sizing: border-box; }
@@ -307,7 +308,7 @@ textarea::placeholder {
   font-size: 0.78rem;
   font-weight: 500;
   padding: 6px 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--ink-2);
@@ -342,7 +343,7 @@ textarea::placeholder {
    .btn-ghost.small: smaller padding for secondary card-level actions.      */
 button {
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 10px 20px;
   font: inherit;
   font-weight: 700;
@@ -461,7 +462,7 @@ button:active { transform: translateY(0); }
   font-size: 0.72rem;
   font-weight: 700;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--line);
   color: var(--muted);
   white-space: nowrap;
@@ -495,7 +496,7 @@ button:active { transform: translateY(0); }
   font-size: 0.72rem;
   font-weight: 700;
   padding: 2px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -619,7 +620,7 @@ button:active { transform: translateY(0); }
 .step-on-error {
   font-size: 0.68rem;
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   margin-left: auto;
   font-weight: 700;
 }
@@ -684,7 +685,7 @@ button:active { transform: translateY(0); }
 .retry-badge {
   font-size: 0.68rem;
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(247,169,34,0.1);
   color: var(--accent);
   border: 1px solid rgba(247,169,34,0.2);
@@ -795,7 +796,7 @@ button:active { transform: translateY(0); }
 .auto-badge {
   font-size: 0.68rem;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(34,197,94,0.1);
   color: var(--accent-2);
   border: 1px solid rgba(34,197,94,0.25);
@@ -861,7 +862,7 @@ button:active { transform: translateY(0); }
 .queue-count {
   font-size: 0.72rem;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-3);
   color: var(--muted);
   border: 1px solid var(--line);
@@ -1044,7 +1045,7 @@ button:active { transform: translateY(0); }
   font-size: 0.68rem;
   font-weight: 700;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .arch-ok      { background: rgba(34,197,94,0.12);  color: var(--accent-2); border: 1px solid rgba(34,197,94,0.3); }
@@ -1124,7 +1125,7 @@ button:active { transform: translateY(0); }
 
 /* Filter pill buttons — smaller than the main button base style */
 .arch-filter-btn {
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 3px 12px;
   font-size: 0.75rem;
   font-weight: 600;
@@ -1245,7 +1246,7 @@ button:active { transform: translateY(0); }
   background: rgba(239,68,68,0.12);
   color: var(--danger);
   border: 1px solid rgba(239,68,68,0.35);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 5px 14px;
   font-size: 0.8rem;
   font-weight: 700;
@@ -1268,7 +1269,7 @@ button:active { transform: translateY(0); }
   background: rgba(234,179,8,0.12);
   color: #ca8a04;
   border: 1px solid rgba(234,179,8,0.35);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 5px 14px;
   font-size: 0.8rem;
   font-weight: 700;

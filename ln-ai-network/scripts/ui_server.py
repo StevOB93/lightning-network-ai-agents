@@ -40,6 +40,8 @@ _CONFIG_KEYS: frozenset[str] = frozenset({
     "LLM_BACKEND",
     "OPENAI_MODEL",
     "OLLAMA_MODEL",
+    "GEMINI_MODEL",
+    "CLAUDE_MODEL",
     "OLLAMA_BASE_URL",
     "MCP_CALL_TIMEOUT_S",
     "MCP_NODE_START_TIMEOUT_S",
@@ -58,12 +60,24 @@ if str(REPO_ROOT) not in sys.path:
 from ai.command_queue import enqueue, last_outbox, paths
 from mcp.ln_mcp_server import handle as mcp_handle
 
+# ---------------------------------------------------------------------------
+# Named constants — keep magic numbers in one place for easy tuning
+# ---------------------------------------------------------------------------
+JSONL_TAIL_LIMIT       = 20       # Default max lines for _read_jsonl_tail
+TRACE_TAIL_LIMIT_REST  = 150      # Trace events returned by /api/trace (REST poll)
+TRACE_TAIL_LIMIT_SSE   = 50       # Trace events per SSE push (compact payloads)
+ARCHIVE_READ_LIMIT     = 10_000   # Max lines when reading an archived trace file
+QUEUE_DISPLAY_LIMIT    = 10       # Inbox/outbox entries in /api/status snapshot
+USER_TEXT_PREVIEW_CHARS = 120     # Truncated preview in archive list view
+SSE_POLL_INTERVAL_S    = 0.4      # File mtime poll interval for SSE stream (seconds)
+TOKEN_POLL_INTERVAL_S  = 0.05     # Token streaming poll interval (seconds)
+
 
 # ---------------------------------------------------------------------------
 # File helpers
 # ---------------------------------------------------------------------------
 
-def _read_jsonl_tail(path: Path, limit: int = 20) -> list[dict[str, Any]]:
+def _read_jsonl_tail(path: Path, limit: int = JSONL_TAIL_LIMIT) -> list[dict[str, Any]]:
     """
     Read the last `limit` valid JSON objects from a JSONL file.
 
@@ -88,7 +102,7 @@ def _read_jsonl_tail(path: Path, limit: int = 20) -> list[dict[str, Any]]:
     return out
 
 
-def _read_trace_tail(limit: int = 150) -> list[dict[str, Any]]:
+def _read_trace_tail(limit: int = TRACE_TAIL_LIMIT_REST) -> list[dict[str, Any]]:
     """
     Return the last `limit` events from the live trace.log.
 
@@ -147,7 +161,7 @@ def _list_archives(q: str = "", status: str = "") -> list[dict[str, Any]]:
             "datetime": dt_str,               # Raw string e.g. "20260319-143022"
             "status": file_status,            # "ok" | "failed" | "partial"
             "size_bytes": p.stat().st_size,
-            "user_text_preview": user_text[:120],  # Truncated for the list view
+            "user_text_preview": user_text[:USER_TEXT_PREVIEW_CHARS],
         })
     return results
 
@@ -259,7 +273,10 @@ def _read_archive(filename: str) -> dict[str, Any] | None:
 
     Returns None (→ 404) if the file is missing or the filename is invalid.
     """
-    # Reject path components that could escape the logs directory
+    # Reject path components that could escape the logs directory.
+    # Decode URL-encoded characters first so %2f etc. can't bypass the check.
+    from urllib.parse import unquote
+    filename = unquote(filename)
     if "/" in filename or "\\" in filename or ".." in filename:
         return None
     p = RUNTIME_DIR / "logs" / filename
@@ -267,7 +284,7 @@ def _read_archive(filename: str) -> dict[str, Any] | None:
         return None
     # limit=10000 effectively reads the whole file — archive files are bounded
     # by the duration of a single query (typically a few hundred events).
-    return {"filename": filename, "events": _read_jsonl_tail(p, limit=10000)}
+    return {"filename": filename, "events": _read_jsonl_tail(p, limit=ARCHIVE_READ_LIMIT)}
 
 
 # ---------------------------------------------------------------------------
@@ -423,8 +440,8 @@ def _runtime_snapshot() -> dict[str, Any]:
     Checks for pipeline.lock first (pipeline mode), then agent.lock (legacy mode).
     """
     qp = paths()
-    inbox = _read_jsonl_tail(qp.inbox, limit=10)
-    outbox = _read_jsonl_tail(qp.outbox, limit=10)
+    inbox = _read_jsonl_tail(qp.inbox, limit=QUEUE_DISPLAY_LIMIT)
+    outbox = _read_jsonl_tail(qp.outbox, limit=QUEUE_DISPLAY_LIMIT)
 
     # Try pipeline.lock first, then legacy agent.lock
     lock_text = ""
@@ -752,13 +769,13 @@ class UIHandler(BaseHTTPRequestHandler):
         if result:
             if not send("pipeline_result", {"result": result}):
                 return
-        # Send last 50 trace events on connect (smaller than REST endpoint's 150)
-        if not send("trace", {"events": _read_trace_tail(limit=50)}):
+        # Send a smaller trace slice on connect (compact vs REST's full history)
+        if not send("trace", {"events": _read_trace_tail(limit=TRACE_TAIL_LIMIT_SSE)}):
             return
 
         try:
             while True:
-                time.sleep(0.4)  # 400ms poll interval — fast enough for real-time feel
+                time.sleep(SSE_POLL_INTERVAL_S)
 
                 # Outbox changed → a pipeline run completed; push result + status
                 if qp.outbox.exists():
@@ -831,9 +848,17 @@ class UIHandler(BaseHTTPRequestHandler):
 
         try:
             while True:
-                time.sleep(0.05)  # 50ms — fast enough for near-real-time token display
+                time.sleep(TOKEN_POLL_INTERVAL_S)
                 if not stream_path.exists():
+                    pos = 0  # file removed — reset so we catch it when recreated
                     continue
+                try:
+                    cur_size = stream_path.stat().st_size
+                except Exception:
+                    continue
+                if cur_size < pos:
+                    # File was truncated/recreated — reset to start of new content
+                    pos = 0
                 try:
                     with stream_path.open("r", encoding="utf-8", errors="ignore") as fh:
                         fh.seek(pos)
@@ -865,7 +890,11 @@ class UIHandler(BaseHTTPRequestHandler):
         while curl users can also use -d 'text=...' form syntax.
         """
         parsed = urlparse(self.path)
+        MAX_CONTENT_LENGTH = 1_000_000  # 1 MB — reject oversized payloads
         length = int(self.headers.get("Content-Length", "0"))
+        if length > MAX_CONTENT_LENGTH:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "Payload too large"})
+            return
         raw = self.rfile.read(length).decode("utf-8") if length else ""
         data: dict[str, Any] = {}
         if raw:

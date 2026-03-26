@@ -134,7 +134,7 @@ def _repair_json(text: str) -> str:
             if op == '*':   return str(a * b)
             if op == '+':   return str(a + b)
             if op == '-':   return str(a - b)
-            if op == '/' and b != 0: return str(a // b)
+            if op == '/' and b != 0: return str(round(a / b))
         except Exception:
             pass
         return m.group(0)

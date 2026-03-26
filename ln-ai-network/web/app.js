@@ -75,6 +75,48 @@ const settingsStatus = $("settings-status"); // Inline feedback next to save but
 const _STRATEGIES = ["cheap", "fast", "detailed", "max_effort"];
 const _STRATEGY_LABELS = { cheap: "Cheap", fast: "Fast", detailed: "Detailed", max_effort: "Max Effort" };
 
+// ---------------------------------------------------------------------------
+// Named constants — polling, timeouts, layout, and truncation
+// ---------------------------------------------------------------------------
+
+// Polling intervals (ms) — fallback when SSE is not active
+const POLL_STATUS_MS       = 3000;
+const POLL_PIPELINE_MS     = 4000;
+const POLL_TRACE_MS        = 3000;
+const POLL_NETWORK_MS      = 15000;
+
+// SSE reconnection delays (ms)
+const SSE_RECONNECT_MS     = 5000;
+
+// UI feedback timeouts (ms)
+const FEEDBACK_TIMEOUT_MS  = 2000;  // Copy button, crash kit, etc.
+const SETTINGS_SAVE_MS     = 3000;  // Settings saved notice
+const CLEAR_STEP1_MS       = 5000;  // Clear All step 1 revert
+const CLEAR_STEP2_MS       = 10000; // Clear All step 2 revert
+const CLEAR_COMPLETE_MS    = 3000;  // Clear All completion notice
+const COPY_SUCCESS_MS      = 1500;  // Copy ✓ feedback
+
+// String truncation lengths
+const TRUNCATE_DEFAULT     = 120;
+const TRUNCATE_QUEUE       = 140;
+const TRUNCATE_EXEC_ARGS   = 160;
+const TRUNCATE_TRACE       = 200;
+const TRUNCATE_DEDUP_KEY   = 40;
+
+// D3 network graph layout
+const GRAPH_MIN_HEIGHT     = 320;
+const GRAPH_MAX_HEIGHT     = 500;
+const GRAPH_PX_PER_NODE    = 60;
+const GRAPH_ZOOM_MIN       = 0.3;
+const GRAPH_ZOOM_MAX       = 4;
+const GRAPH_LINK_DISTANCE  = 120;
+const GRAPH_CHARGE_STRENGTH = -300;
+const GRAPH_COLLIDE_RADIUS = 30;
+const GRAPH_NODE_RADIUS    = 16;
+const GRAPH_ARROW_REF_X    = 18;   // node radius (16) + stroke (2)
+const GRAPH_LABEL_OFFSET_Y = -6;
+const GRAPH_CAPACITY_UNIT  = 1_000_000;  // satoshis per display unit (M)
+
 /** Return the currently selected strategy mode. */
 function getStrategy() {
   return strategyBtn ? strategyBtn.dataset.strategy : "fast";
@@ -137,7 +179,7 @@ function esc(str) {
  * Truncate a string to n characters, appending "…" if it was cut.
  * Used throughout the UI to keep long JSON payloads from overflowing.
  */
-function truncate(str, n = 120) {
+function truncate(str, n = TRUNCATE_DEFAULT) {
   const s = String(str ?? "");
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
@@ -317,7 +359,7 @@ function renderExecution(stepResults, _stageFailed) {
           ${retries}
           <span class="step-num muted">#${sr.step_id}</span>
         </div>
-        <div class="step-args muted">${esc(truncate(JSON.stringify(sr.args), 160))}</div>
+        <div class="step-args muted">${esc(truncate(JSON.stringify(sr.args), TRUNCATE_EXEC_ARGS))}</div>
         ${errRow}
       </div>
     `;
@@ -426,7 +468,7 @@ function renderTrace(events) {
 
   for (const ev of events) {
     // Build a dedup key: timestamp + first available event type discriminator
-    const key = `${ev.ts}-${ev.kind || ev.event || JSON.stringify(ev).slice(0, 40)}`;
+    const key = `${ev.ts}-${ev.kind || ev.event || JSON.stringify(ev).slice(0, TRUNCATE_DEDUP_KEY)}`;
     if (_seenTraceTs.has(key)) continue;
     _seenTraceTs.add(key);
     appended = true;
@@ -440,7 +482,7 @@ function renderTrace(events) {
       const copy = { ...ev };
       delete copy.ts; delete copy.kind; delete copy.event; delete copy.stage;
       const s = JSON.stringify(copy);
-      return s === "{}" ? "" : truncate(s, 200);
+      return s === "{}" ? "" : truncate(s, TRUNCATE_TRACE);
     })();
     row.innerHTML = `<span class="trace-ts">${ts}</span><span class="trace-kind">${esc(kind)}</span>${detail ? `<span class="trace-detail">${esc(detail)}</span>` : ""}`;
     // Prepend so the newest event appears at the top
@@ -620,7 +662,7 @@ function renderArchiveTrace(container, events) {
     const copy = { ...ev };
     delete copy.ts; delete copy.kind; delete copy.event; delete copy.stage;
     const s = JSON.stringify(copy);
-    const detail = s === "{}" ? "" : truncate(s, 200);
+    const detail = s === "{}" ? "" : truncate(s, TRUNCATE_TRACE);
     return `<div class="trace-row"><span class="trace-ts">${ts}</span><span class="trace-kind">${esc(kind)}</span>${detail ? `<span class="trace-detail">${esc(detail)}</span>` : ""}</div>`;
   }).join("");
 }
@@ -658,7 +700,7 @@ function renderQueue(container, countEl, items, labelPrefix, hideBeforeTs = 0) {
           <button class="copy-btn copy-btn-inline" data-copy="${esc(body)}" title="Copy">⎘</button>
           <span class="muted">${fmtTs(item.ts)}</span>
         </div>
-        <div class="queue-item-body muted">${esc(truncate(body, 140))}</div>
+        <div class="queue-item-body muted">${esc(truncate(body, TRUNCATE_QUEUE))}</div>
       </div>`;
   }).join("");
 }
@@ -752,8 +794,7 @@ function renderNetwork(data) {
   networkViz.innerHTML = "";
 
   const W = networkViz.clientWidth || 700;
-  // Adaptive height: 60px per node, clamped between 320 and 500px
-  const H = Math.max(320, Math.min(500, nodes.length * 60));
+  const H = Math.max(GRAPH_MIN_HEIGHT, Math.min(GRAPH_MAX_HEIGHT, nodes.length * GRAPH_PX_PER_NODE));
 
   const svg = d3.select(networkViz).append("svg")
     .attr("width", W)
@@ -764,13 +805,12 @@ function renderNetwork(data) {
 
   // Container group for zoom/pan transform — all graph elements go inside <g>
   const g = svg.append("g");
-  // Zoom: 0.3x minimum (zoom out) to 4x maximum (zoom in)
-  svg.call(d3.zoom().scaleExtent([0.3, 4]).on("zoom", e => g.attr("transform", e.transform)));
+  svg.call(d3.zoom().scaleExtent([GRAPH_ZOOM_MIN, GRAPH_ZOOM_MAX]).on("zoom", e => g.attr("transform", e.transform)));
 
   // Arrow marker definition — placed in <defs> so it can be referenced by URL
-  // refX=18 positions the arrowhead at the node circle's edge (radius 16 + 2 stroke)
+  // refX positions the arrowhead at the node circle's edge (radius + stroke)
   svg.append("defs").append("marker")
-    .attr("id", "arrow").attr("viewBox", "0 -4 8 8").attr("refX", 18).attr("refY", 0)
+    .attr("id", "arrow").attr("viewBox", "0 -4 8 8").attr("refX", GRAPH_ARROW_REF_X).attr("refY", 0)
     .attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
     .append("path").attr("d", "M0,-4L8,0L0,4").attr("fill", "var(--accent)");
 
@@ -785,7 +825,7 @@ function renderNetwork(data) {
   const linkLabel = g.append("g").selectAll("text").data(links).join("text")
     .attr("font-size", 9).attr("fill", "var(--muted)").attr("text-anchor", "middle")
     .attr("font-family", "IBM Plex Mono, monospace")
-    .text(d => d.capacity ? `${(d.capacity / 1_000_000).toFixed(2)}M` : "");
+    .text(d => d.capacity ? `${(d.capacity / GRAPH_CAPACITY_UNIT).toFixed(2)}M` : "");
 
   // Node groups — each contains a circle + label text + tooltip <title>
   const node = g.append("g").selectAll("g").data(nodes).join("g")
@@ -799,7 +839,7 @@ function renderNetwork(data) {
       .on("end",   (e, d) => { if (!e.active) _simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
 
   node.append("circle")
-    .attr("r", 16)
+    .attr("r", GRAPH_NODE_RADIUS)
     .attr("fill", "var(--accent-dim)")
     .attr("stroke", "var(--accent)")
     .attr("stroke-width", 2);
@@ -820,10 +860,10 @@ function renderNetwork(data) {
   //   center:  pulls all nodes toward the canvas center (prevents drift)
   //   collide: prevents node circles from overlapping (radius=30)
   _simulation = d3.forceSimulation(nodes)
-    .force("link", d3.forceLink(links).id(d => d.id).distance(120))
-    .force("charge", d3.forceManyBody().strength(-300))
+    .force("link", d3.forceLink(links).id(d => d.id).distance(GRAPH_LINK_DISTANCE))
+    .force("charge", d3.forceManyBody().strength(GRAPH_CHARGE_STRENGTH))
     .force("center", d3.forceCenter(W / 2, H / 2))
-    .force("collide", d3.forceCollide(30))
+    .force("collide", d3.forceCollide(GRAPH_COLLIDE_RADIUS))
     .on("tick", () => {
       // Update all element positions on each simulation tick
       link
@@ -831,7 +871,7 @@ function renderNetwork(data) {
         .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
       linkLabel
         .attr("x", d => (d.source.x + d.target.x) / 2)
-        .attr("y", d => (d.source.y + d.target.y) / 2 - 6);  // Offset above the line
+        .attr("y", d => (d.source.y + d.target.y) / 2 + GRAPH_LABEL_OFFSET_Y);
       node.attr("transform", d => `translate(${d.x},${d.y})`);
     });
 
@@ -1007,7 +1047,7 @@ async function copyCrashKit() {
     preview.textContent = text;
     await navigator.clipboard.writeText(text);
     btn.textContent = "✓ Copied!";
-    setTimeout(() => { btn.textContent = "⎘ Copy Crash Kit"; btn.disabled = false; }, 2000);
+    setTimeout(() => { btn.textContent = "⎘ Copy Crash Kit"; btn.disabled = false; }, FEEDBACK_TIMEOUT_MS);
   } catch (e) {
     preview.textContent = "Error generating crash kit: " + e.message;
     btn.textContent = "⎘ Copy Crash Kit";
@@ -1016,7 +1056,134 @@ async function copyCrashKit() {
 }
 
 // ---------------------------------------------------------------------------
-// Settings
+// Settings — LLM model registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps each LLM backend to its env key and available models.
+ * The first model in each list is the default for that backend.
+ * "custom" is always appended at render time to allow free-text input.
+ */
+const _LLM_MODELS = {
+  openai: {
+    envKey: "OPENAI_MODEL",
+    models: [
+      { value: "gpt-4o",        label: "GPT-4o" },
+      { value: "gpt-4o-mini",   label: "GPT-4o Mini" },
+      { value: "gpt-4.1",       label: "GPT-4.1" },
+      { value: "gpt-4.1-mini",  label: "GPT-4.1 Mini" },
+      { value: "gpt-4.1-nano",  label: "GPT-4.1 Nano" },
+      { value: "o3-mini",       label: "o3-mini" },
+    ],
+  },
+  ollama: {
+    envKey: "OLLAMA_MODEL",
+    models: [
+      { value: "llama3.2:3b",     label: "Llama 3.2 3B" },
+      { value: "llama3.1:8b",     label: "Llama 3.1 8B" },
+      { value: "llama3.1:70b",    label: "Llama 3.1 70B" },
+      { value: "qwen2.5:3b",      label: "Qwen 2.5 3B" },
+      { value: "qwen2.5:7b",      label: "Qwen 2.5 7B" },
+      { value: "qwen2.5:14b",     label: "Qwen 2.5 14B" },
+      { value: "mistral:7b",      label: "Mistral 7B" },
+      { value: "gemma3:9b",       label: "Gemma 3 9B" },
+      { value: "phi4-mini:3.8b",  label: "Phi-4 Mini 3.8B" },
+      { value: "deepseek-r1:14b", label: "DeepSeek-R1 14B" },
+    ],
+  },
+  gemini: {
+    envKey: "GEMINI_MODEL",
+    models: [
+      { value: "gemini-2.5-flash",  label: "Gemini 2.5 Flash" },
+      { value: "gemini-2.5-pro",    label: "Gemini 2.5 Pro" },
+      { value: "gemini-2.0-flash",  label: "Gemini 2.0 Flash" },
+    ],
+  },
+  anthropic: {
+    envKey: "CLAUDE_MODEL",
+    models: [
+      { value: "claude-opus-4-6",   label: "Claude Opus 4.6" },
+      { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
+      { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+    ],
+  },
+};
+
+// Track the currently active model env key so save knows which key to write
+let _activeModelEnvKey = "OPENAI_MODEL";
+
+/**
+ * Populate the model dropdown based on the selected LLM backend.
+ * If currentValue matches a known model, select it; otherwise add it as a
+ * custom entry. Always appends a "Custom…" option at the end.
+ */
+function populateModelDropdown(backend, currentValue) {
+  const modelSelect = $("cfg-llm-model");
+  if (!modelSelect) return;
+
+  const entry = _LLM_MODELS[backend] || _LLM_MODELS.openai;
+  _activeModelEnvKey = entry.envKey;
+
+  // Clear existing options
+  modelSelect.innerHTML = "";
+
+  // Add known models
+  let matched = false;
+  for (const m of entry.models) {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    opt.textContent = m.label;
+    if (currentValue === m.value) {
+      opt.selected = true;
+      matched = true;
+    }
+    modelSelect.appendChild(opt);
+  }
+
+  // Add separator + custom option
+  const customOpt = document.createElement("option");
+  customOpt.value = "__custom__";
+  customOpt.textContent = "Custom…";
+  modelSelect.appendChild(customOpt);
+
+  // If the current value doesn't match any known model, insert it as a custom entry
+  if (currentValue && !matched) {
+    const customEntry = document.createElement("option");
+    customEntry.value = currentValue;
+    customEntry.textContent = `${currentValue} (custom)`;
+    customEntry.selected = true;
+    modelSelect.insertBefore(customEntry, customOpt);
+  }
+
+  // Show/hide the Ollama URL field
+  const ollamaUrlField = $("ollama-url-field");
+  if (ollamaUrlField) {
+    ollamaUrlField.style.display = backend === "ollama" ? "" : "none";
+  }
+}
+
+/**
+ * Handle model dropdown change — if "Custom…" is selected, prompt for input.
+ */
+function onModelChange() {
+  const modelSelect = $("cfg-llm-model");
+  if (!modelSelect || modelSelect.value !== "__custom__") return;
+  const custom = prompt("Enter custom model name:");
+  if (custom && custom.trim()) {
+    const opt = document.createElement("option");
+    opt.value = custom.trim();
+    opt.textContent = `${custom.trim()} (custom)`;
+    // Insert before the "Custom…" option
+    modelSelect.insertBefore(opt, modelSelect.querySelector('option[value="__custom__"]'));
+    opt.selected = true;
+  } else {
+    // Revert to first option if cancelled
+    modelSelect.selectedIndex = 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settings — load / save
 // ---------------------------------------------------------------------------
 
 /**
@@ -1033,6 +1200,13 @@ async function loadSettings() {
         el.value = val;
       }
     });
+
+    // Populate the model dropdown based on the loaded backend
+    const backendSelect = $("cfg-llm-backend");
+    const backend = backendSelect ? backendSelect.value : "openai";
+    const entry = _LLM_MODELS[backend] || _LLM_MODELS.openai;
+    const currentModel = data[entry.envKey] || "";
+    populateModelDropdown(backend, currentModel);
   } catch (_) {
     // Non-fatal: form fields keep their defaults if load fails
   }
@@ -1049,10 +1223,17 @@ async function saveSettings() {
     // Send the field even if empty — allows clearing a previously set value
     updates[el.dataset.key] = val;
   });
+
+  // Add the model selection using the correct env key for the active backend
+  const modelSelect = $("cfg-llm-model");
+  if (modelSelect && modelSelect.value && modelSelect.value !== "__custom__") {
+    updates[_activeModelEnvKey] = modelSelect.value;
+  }
+
   const data = await postJson("/api/config", updates);
   settingsStatus.textContent = `Saved: ${(data.saved || []).join(", ") || "nothing changed"}`;
   settingsStatus.className = "settings-status ok";
-  setTimeout(() => { settingsStatus.textContent = ""; settingsStatus.className = "settings-status"; }, 3000);
+  setTimeout(() => { settingsStatus.textContent = ""; settingsStatus.className = "settings-status"; }, SETTINGS_SAVE_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,7 +1313,7 @@ function advanceClearAll() {
     const btn = $("clear-all-btn");
     btn.textContent = "Are you sure? Click again to confirm";
     btn.classList.add("btn-danger-sm-active");
-    _clearTimeout = setTimeout(resetClearAll, 5000);
+    _clearTimeout = setTimeout(resetClearAll, CLEAR_STEP1_MS);
   } else if (_clearStep === 1) {
     _clearStep = 2;
     const action = $("clear-all-action");
@@ -1152,7 +1333,7 @@ function advanceClearAll() {
     confirmBtn.addEventListener("click", executeClearAll);
     $("clear-cancel-btn").addEventListener("click", resetClearAll);
     input.focus();
-    _clearTimeout = setTimeout(resetClearAll, 10000);
+    _clearTimeout = setTimeout(resetClearAll, CLEAR_STEP2_MS);
   }
 }
 
@@ -1177,10 +1358,10 @@ async function executeClearAll() {
     setBadge(badgePlanner, stagePlanner, "");
     setBadge(badgeExecutor, stageExecutor, "");
     setLog("System cleared. Agent restarting fresh…");
-    setTimeout(resetClearAll, 3000);
+    setTimeout(resetClearAll, CLEAR_COMPLETE_MS);
   } catch (e) {
     action.innerHTML = `<span class="clear-status error">Error: ${esc(e.message)}</span>`;
-    setTimeout(resetClearAll, 3000);
+    setTimeout(resetClearAll, CLEAR_COMPLETE_MS);
   }
 }
 
@@ -1250,6 +1431,19 @@ $("settings-save-btn").addEventListener("click", () =>
     settingsStatus.className = "settings-status error";
   })
 );
+
+// Backend dropdown → repopulate model list when backend changes
+$("cfg-llm-backend").addEventListener("change", () => {
+  const backend = $("cfg-llm-backend").value;
+  populateModelDropdown(backend, "");
+});
+
+// Model dropdown → handle "Custom…" selection
+$("cfg-llm-model").addEventListener("change", onModelChange);
+
+// Initialize model dropdown on page load (default to openai until settings load)
+populateModelDropdown($("cfg-llm-backend").value, "");
+
 $("clear-all-btn").addEventListener("click", advanceClearAll);
 
 // Enter submits; Shift+Enter inserts a newline (default textarea behavior)
@@ -1346,7 +1540,7 @@ function startSSE() {
     }
 
     updateSSEIndicator("reconnecting");
-    setTimeout(startSSE, 5000);
+    setTimeout(startSSE, SSE_RECONNECT_MS);
   };
 
   return true;
@@ -1396,7 +1590,7 @@ function startTokenSSE() {
   es.onerror = () => {
     es.close();
     if (_shutdownRequested) return;  // Don't reconnect after shutdown
-    setTimeout(startTokenSSE, 5000);
+    setTimeout(startTokenSSE, SSE_RECONNECT_MS);
   };
 }
 
@@ -1447,13 +1641,13 @@ startTokenSSE();
 
 // Polling fallback intervals — only fire when SSE is not delivering updates.
 // This handles browsers that don't support EventSource or networks that block SSE.
-setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchStatus().catch(() => {}); }, 3000);
-setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchPipelineResult().catch(() => {}); }, 4000);
-setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchTrace().catch(() => {}); }, 3000);
+setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchStatus().catch(() => {}); }, POLL_STATUS_MS);
+setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchPipelineResult().catch(() => {}); }, POLL_PIPELINE_MS);
+setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchTrace().catch(() => {}); }, POLL_TRACE_MS);
 
-// Network graph always polls independently — it's infrequent (15s) and not
+// Network graph always polls independently — it's infrequent and not
 // pushed via SSE because network topology rarely changes mid-session.
-setInterval(() => { if (!_shutdownRequested) fetchNetwork().catch(() => {}); }, 15000);
+setInterval(() => { if (!_shutdownRequested) fetchNetwork().catch(() => {}); }, POLL_NETWORK_MS);
 
 // ---------------------------------------------------------------------------
 // Copy buttons (global delegated listener)
@@ -1477,7 +1671,7 @@ document.addEventListener('click', e => {
     // Visual feedback: briefly show ✓ before reverting to ⎘
     btn.textContent = '✓';
     btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = '⎘'; btn.classList.remove('copied'); }, 1500);
+    setTimeout(() => { btn.textContent = '⎘'; btn.classList.remove('copied'); }, COPY_SUCCESS_MS);
   });
 });
 

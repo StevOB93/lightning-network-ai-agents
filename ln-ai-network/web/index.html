@@ -343,18 +343,14 @@
                   <option value="openai">OpenAI</option>
                   <option value="ollama">Ollama (local)</option>
                   <option value="gemini">Gemini</option>
-                  <option value="anthropic">Anthropic</option>
+                  <option value="anthropic">Anthropic (Claude)</option>
                 </select>
               </div>
               <div class="settings-field">
-                <label for="cfg-openai-model">OpenAI Model</label>
-                <input id="cfg-openai-model" class="settings-input" type="text" data-key="OPENAI_MODEL" placeholder="gpt-4o">
+                <label for="cfg-llm-model">Model</label>
+                <select id="cfg-llm-model" class="settings-select"></select>
               </div>
-              <div class="settings-field">
-                <label for="cfg-ollama-model">Ollama Model</label>
-                <input id="cfg-ollama-model" class="settings-input" type="text" data-key="OLLAMA_MODEL" placeholder="llama3.2">
-              </div>
-              <div class="settings-field">
+              <div class="settings-field" id="ollama-url-field">
                 <label for="cfg-ollama-url">Ollama Base URL</label>
                 <input id="cfg-ollama-url" class="settings-input" type="text" data-key="OLLAMA_BASE_URL" placeholder="http://localhost:11434">
               </div>

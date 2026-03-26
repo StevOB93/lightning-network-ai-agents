@@ -23,6 +23,7 @@ from __future__ import annotations
 # =============================================================================
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -137,7 +138,11 @@ def _get_node_count() -> int:
         p = Path(__file__).resolve().parent.parent / "runtime" / "node_count"
         return int(p.read_text().strip())
     except (FileNotFoundError, ValueError):
-        return 2
+        fallback = os.getenv("DEFAULT_NODE_COUNT")
+        try:
+            return int(fallback) if fallback else 2
+        except (ValueError, TypeError):
+            return 2
 
 
 # =============================================================================

@@ -43,6 +43,7 @@ class RuntimeConfig:
     lightning_base: Path
 
     bitcoin_rpc_port: int
+    bitcoin_rpc_host: str
     bitcoin_rpc_user: str
     bitcoin_rpc_password: str
 
@@ -63,6 +64,7 @@ def load_config() -> RuntimeConfig:
         bitcoin_dir=bitcoin_dir,
         lightning_base=lightning_base,
         bitcoin_rpc_port=_env_int("BITCOIN_RPC_PORT", 18443),
+        bitcoin_rpc_host=_env("BITCOIN_RPC_HOST", "127.0.0.1"),
         bitcoin_rpc_user=_env("BITCOIN_RPC_USER", "lnrpc"),
         bitcoin_rpc_password=_env("BITCOIN_RPC_PASSWORD", "lnrpcpass"),
         lightning_base_port=_env_int("LIGHTNING_BASE_PORT", 9735),
@@ -374,7 +376,7 @@ def ln_node_start(
         f"--network={cfg.network}",
         f"--lightning-dir={str(nd)}",
         *addr_flags,
-        "--bitcoin-rpcconnect=127.0.0.1",
+        f"--bitcoin-rpcconnect={cfg.bitcoin_rpc_host}",
         f"--bitcoin-rpcport={cfg.bitcoin_rpc_port}",
         f"--bitcoin-rpcuser={cfg.bitcoin_rpc_user}",
         f"--bitcoin-rpcpassword={cfg.bitcoin_rpc_password}",
