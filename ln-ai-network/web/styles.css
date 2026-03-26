@@ -1397,6 +1397,68 @@ button:active { transform: translateY(0); }
 .settings-status.ok   { color: var(--accent-2); }
 .settings-status.error { color: var(--danger); }
 
+/* API key input row: input + show/hide toggle side by side */
+.key-input-wrap {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.key-input-wrap .settings-input {
+  flex: 1;
+}
+.key-toggle {
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  background: var(--surface-3);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.key-toggle:hover {
+  border-color: var(--line-strong);
+}
+
+/* Inline badge next to the API key label */
+.key-status {
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-left: 6px;
+}
+.key-status.key-set     { color: var(--accent-2); }
+.key-status.key-missing { color: var(--danger); }
+
+/* Red dot on Settings tab when API key is missing */
+.tab-btn.needs-attention {
+  position: relative;
+}
+.tab-btn.needs-attention::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  background: var(--danger);
+  border-radius: 50%;
+}
+
+/* Secondary action button (restart agent) */
+.btn-secondary {
+  padding: 7px 16px;
+  font-size: 0.82rem;
+  background: var(--surface-3);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.btn-secondary:hover {
+  border-color: var(--accent);
+}
+
 /* ── Streaming cursor (shown on #summary-body while LLM tokens arrive) ── */
 @keyframes blink {
   0%, 100% { opacity: 1; }

@@ -35,7 +35,6 @@ RUNTIME_DIR = REPO_ROOT / "runtime" / "agent"
 ENV_FILE = REPO_ROOT / ".env"
 
 # Config keys that may be read/written via /api/config.
-# API keys are intentionally excluded — they must be set manually in .env.
 _CONFIG_KEYS: frozenset[str] = frozenset({
     "LLM_BACKEND",
     "OPENAI_MODEL",
@@ -43,6 +42,9 @@ _CONFIG_KEYS: frozenset[str] = frozenset({
     "GEMINI_MODEL",
     "CLAUDE_MODEL",
     "OLLAMA_BASE_URL",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "ANTHROPIC_API_KEY",
     "MCP_CALL_TIMEOUT_S",
     "MCP_NODE_START_TIMEOUT_S",
     "MCP_NODE_STOP_TIMEOUT_S",
@@ -52,6 +54,34 @@ _CONFIG_KEYS: frozenset[str] = frozenset({
     "UI_HOST",
     "UI_PORT",
 })
+
+# API key env vars — returned masked (never exposed in full via the HTTP API).
+_API_KEY_KEYS: frozenset[str] = frozenset({
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "ANTHROPIC_API_KEY",
+})
+
+_API_KEY_PLACEHOLDERS = {
+    "__REPLACE_WITH_REAL_KEY__",
+    "__PASTE_YOUR_OPENAI_KEY_HERE__",
+    "__PASTE_YOUR_GEMINI_KEY_HERE__",
+    "__PASTE_YOUR_ANTHROPIC_KEY_HERE__",
+}
+
+
+def _mask_api_key(value: str) -> str:
+    """Return a masked version of an API key for safe display."""
+    if not value or value in _API_KEY_PLACEHOLDERS:
+        return ""
+    if len(value) < 8:
+        return "****"
+    return value[:3] + "..." + value[-4:]
+
+
+def _is_masked_value(value: str) -> bool:
+    """True if value looks like a masked placeholder rather than a real key."""
+    return not value or value == "****" or "..." in value
 
 # Ensure the repo root is on sys.path so we can import ai.* and mcp.*
 if str(REPO_ROOT) not in sys.path:
@@ -519,11 +549,23 @@ def _read_config() -> dict[str, Any]:
     Priority: live env var (set at process start) → .env file value → empty string.
     Both sources are returned so the UI can distinguish "saved in .env" from
     "only in current environment (not persisted)".
+
+    API keys are returned masked (first 3 + last 4 chars only) with a companion
+    ``KEY__set`` boolean so the UI can show a status badge without ever receiving
+    the full secret.
     """
     env_file = _read_env_file()
     result: dict[str, Any] = {}
     for key in _CONFIG_KEYS:
         result[key] = os.getenv(key, env_file.get(key, ""))
+
+    # Mask API keys — never expose the full secret via HTTP
+    for key in _API_KEY_KEYS:
+        raw = result.get(key, "")
+        is_set = bool(raw) and raw not in _API_KEY_PLACEHOLDERS
+        result[key + "__set"] = is_set
+        result[key] = _mask_api_key(raw)
+
     return result
 
 
@@ -532,9 +574,15 @@ def _write_config(updates: dict[str, str]) -> None:
     Merge updates into .env, preserving existing lines and comments.
 
     Only keys in _CONFIG_KEYS are accepted; unknown keys are silently dropped.
+    API keys that look masked (empty, "****", or contain "...") are also dropped
+    so that a load→save round-trip never overwrites a real key with its mask.
     Existing lines for a key are updated in-place; new keys are appended at the end.
     """
     filtered = {k: v for k, v in updates.items() if k in _CONFIG_KEYS}
+    # Never overwrite a real API key with a masked placeholder
+    for key in _API_KEY_KEYS:
+        if key in filtered and _is_masked_value(filtered[key]):
+            del filtered[key]
     if not filtered:
         return
 
@@ -934,6 +982,27 @@ class UIHandler(BaseHTTPRequestHandler):
                 return
             _write_config({str(k): str(v) for k, v in data.items()})
             self._json(HTTPStatus.OK, {"saved": [k for k in data if k in _CONFIG_KEYS]})
+
+        elif parsed.path == "/api/restart_agent":
+            # Restart just the AI agent process (preserves inbox/outbox).
+            restart_script = REPO_ROOT / "scripts" / "restart_agent.sh"
+            if not restart_script.exists():
+                self._json(HTTPStatus.NOT_FOUND, {"error": "restart_agent.sh not found"})
+                return
+            self._json(HTTPStatus.OK, {"status": "restart_initiated"})
+
+            def _do_restart_agent() -> None:
+                time.sleep(0.3)
+                try:
+                    subprocess.Popen(
+                        ["bash", str(restart_script)],
+                        cwd=str(REPO_ROOT),
+                        start_new_session=True,
+                    )
+                except Exception as exc:
+                    print(f"[ERROR] Failed to launch restart_agent.sh: {exc}", flush=True)
+
+            threading.Thread(target=_do_restart_agent, daemon=True).start()
 
         elif parsed.path == "/api/shutdown":
             # Run shutdown.sh in a background thread so the HTTP response is sent

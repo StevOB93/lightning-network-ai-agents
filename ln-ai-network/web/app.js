@@ -1112,6 +1112,18 @@ const _LLM_MODELS = {
 // Track the currently active model env key so save knows which key to write
 let _activeModelEnvKey = "OPENAI_MODEL";
 
+// Maps each backend to its API key env var and DOM element IDs.
+// Ollama is local-only and has no API key.
+const _API_KEY_MAP = {
+  openai:    { envKey: "OPENAI_API_KEY",    statusId: "key-status-openai" },
+  gemini:    { envKey: "GEMINI_API_KEY",    statusId: "key-status-gemini" },
+  anthropic: { envKey: "ANTHROPIC_API_KEY", statusId: "key-status-anthropic" },
+};
+
+// Track which API key inputs the user has actually modified — prevents
+// overwriting real keys with masked placeholders on save.
+const _dirtyApiKeys = new Set();
+
 /**
  * Populate the model dropdown based on the selected LLM backend.
  * If currentValue matches a known model, select it; otherwise add it as a
@@ -1160,6 +1172,19 @@ function populateModelDropdown(backend, currentValue) {
   if (ollamaUrlField) {
     ollamaUrlField.style.display = backend === "ollama" ? "" : "none";
   }
+
+  // Show/hide API key fields based on backend
+  updateApiKeyVisibility(backend);
+}
+
+/**
+ * Show only the API key field matching the selected backend; hide the others.
+ * Ollama has no API key, so all key fields are hidden when ollama is selected.
+ */
+function updateApiKeyVisibility(backend) {
+  document.querySelectorAll(".api-key-field").forEach(field => {
+    field.style.display = field.dataset.backend === backend ? "" : "none";
+  });
 }
 
 /**
@@ -1195,6 +1220,8 @@ async function loadSettings() {
     const res = await fetch("/api/config");
     const data = await res.json();
     document.querySelectorAll("[data-key]").forEach(el => {
+      // Skip API key inputs — they get special handling below
+      if (el.classList.contains("api-key-input")) return;
       const val = data[el.dataset.key];
       if (val !== undefined && val !== null) {
         el.value = val;
@@ -1207,6 +1234,30 @@ async function loadSettings() {
     const entry = _LLM_MODELS[backend] || _LLM_MODELS.openai;
     const currentModel = data[entry.envKey] || "";
     populateModelDropdown(backend, currentModel);
+
+    // Update API key fields: show masked placeholder + status badge
+    _dirtyApiKeys.clear();
+    for (const [bk, info] of Object.entries(_API_KEY_MAP)) {
+      const isSet = data[info.envKey + "__set"] === true;
+      const masked = data[info.envKey] || "";
+
+      // Update the password input with the masked value (non-editable placeholder feel)
+      const input = document.querySelector(`.api-key-input[data-key="${info.envKey}"]`);
+      if (input) {
+        input.value = masked;
+        input.dataset.masked = "true";
+      }
+
+      // Update the status badge
+      const badge = $(info.statusId);
+      if (badge) {
+        badge.textContent = isSet ? "Set" : "Not set";
+        badge.className = "key-status " + (isSet ? "key-set" : "key-missing");
+      }
+    }
+
+    // Update attention indicator on Settings tab
+    updateSettingsAttention(data);
   } catch (_) {
     // Non-fatal: form fields keep their defaults if load fails
   }
@@ -1219,6 +1270,13 @@ async function loadSettings() {
 async function saveSettings() {
   const updates = {};
   document.querySelectorAll("[data-key]").forEach(el => {
+    // Only include API key inputs if the user actually typed a new value
+    if (el.classList.contains("api-key-input")) {
+      if (_dirtyApiKeys.has(el.dataset.key)) {
+        updates[el.dataset.key] = el.value.trim();
+      }
+      return;
+    }
     const val = el.value.trim();
     // Send the field even if empty — allows clearing a previously set value
     updates[el.dataset.key] = val;
@@ -1233,7 +1291,56 @@ async function saveSettings() {
   const data = await postJson("/api/config", updates);
   settingsStatus.textContent = `Saved: ${(data.saved || []).join(", ") || "nothing changed"}`;
   settingsStatus.className = "settings-status ok";
+
+  // Show restart button so user can apply changes
+  const restartBtn = $("restart-agent-btn");
+  if (restartBtn) restartBtn.style.display = "";
+
   setTimeout(() => { settingsStatus.textContent = ""; settingsStatus.className = "settings-status"; }, SETTINGS_SAVE_MS);
+
+  // Reload settings to refresh masked values and status badges
+  await loadSettings();
+}
+
+// ---------------------------------------------------------------------------
+// Settings — attention indicator + restart agent
+// ---------------------------------------------------------------------------
+
+/**
+ * Show a red dot on the Settings tab if the active backend needs an API key
+ * that isn't set.  Called from loadSettings() with the config response data.
+ */
+function updateSettingsAttention(configData) {
+  const settingsTab = document.querySelector('[data-tab="settings"]');
+  if (!settingsTab) return;
+  const backend = (configData.LLM_BACKEND || "openai").toLowerCase();
+  const info = _API_KEY_MAP[backend];
+  // Ollama is local — never needs an API key
+  const needsKey = info && configData[info.envKey + "__set"] === false;
+  settingsTab.classList.toggle("needs-attention", !!needsKey);
+}
+
+/**
+ * Restart just the AI agent process (preserves inbox/outbox).
+ * Shows a brief status message while the script runs.
+ */
+async function restartAgent() {
+  const restartBtn = $("restart-agent-btn");
+  if (restartBtn) restartBtn.disabled = true;
+  settingsStatus.textContent = "Restarting agent...";
+  settingsStatus.className = "settings-status";
+  try {
+    await postJson("/api/restart_agent", {});
+    settingsStatus.textContent = "Agent restarting — changes will take effect shortly.";
+    settingsStatus.className = "settings-status ok";
+    if (restartBtn) restartBtn.style.display = "none";
+  } catch (e) {
+    settingsStatus.textContent = "Restart failed: " + e.message;
+    settingsStatus.className = "settings-status error";
+  } finally {
+    if (restartBtn) restartBtn.disabled = false;
+    setTimeout(() => { settingsStatus.textContent = ""; settingsStatus.className = "settings-status"; }, SETTINGS_SAVE_MS);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,6 +1550,35 @@ $("cfg-llm-model").addEventListener("change", onModelChange);
 
 // Initialize model dropdown on page load (default to openai until settings load)
 populateModelDropdown($("cfg-llm-backend").value, "");
+
+// Restart Agent button
+$("restart-agent-btn").addEventListener("click", () =>
+  restartAgent().catch(() => {})
+);
+
+// API key inputs: clear masked value on focus, track dirty state on input
+document.querySelectorAll(".api-key-input").forEach(input => {
+  input.addEventListener("focus", () => {
+    if (input.dataset.masked === "true") {
+      input.value = "";
+      input.dataset.masked = "false";
+    }
+  });
+  input.addEventListener("input", () => {
+    _dirtyApiKeys.add(input.dataset.key);
+  });
+});
+
+// API key show/hide toggle buttons
+document.querySelectorAll(".key-toggle").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const input = $(btn.dataset.target);
+    if (!input) return;
+    const showing = input.type === "text";
+    input.type = showing ? "password" : "text";
+    btn.textContent = showing ? "Show" : "Hide";
+  });
+});
 
 $("clear-all-btn").addEventListener("click", advanceClearAll);
 

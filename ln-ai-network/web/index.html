@@ -357,6 +357,37 @@
             </div>
           </div>
 
+          <!-- API Keys -->
+          <div class="settings-group">
+            <div class="settings-group-title">API Keys</div>
+            <div class="settings-fields">
+              <div class="settings-field api-key-field" data-backend="openai">
+                <label for="cfg-openai-key">OpenAI API Key <span class="key-status" id="key-status-openai"></span></label>
+                <div class="key-input-wrap">
+                  <input id="cfg-openai-key" class="settings-input api-key-input" type="password"
+                         data-key="OPENAI_API_KEY" autocomplete="off" placeholder="sk-...">
+                  <button type="button" class="key-toggle" data-target="cfg-openai-key" title="Show/hide key">Show</button>
+                </div>
+              </div>
+              <div class="settings-field api-key-field" data-backend="gemini">
+                <label for="cfg-gemini-key">Gemini API Key <span class="key-status" id="key-status-gemini"></span></label>
+                <div class="key-input-wrap">
+                  <input id="cfg-gemini-key" class="settings-input api-key-input" type="password"
+                         data-key="GEMINI_API_KEY" autocomplete="off" placeholder="AI...">
+                  <button type="button" class="key-toggle" data-target="cfg-gemini-key" title="Show/hide key">Show</button>
+                </div>
+              </div>
+              <div class="settings-field api-key-field" data-backend="anthropic">
+                <label for="cfg-anthropic-key">Anthropic API Key <span class="key-status" id="key-status-anthropic"></span></label>
+                <div class="key-input-wrap">
+                  <input id="cfg-anthropic-key" class="settings-input api-key-input" type="password"
+                         data-key="ANTHROPIC_API_KEY" autocomplete="off" placeholder="sk-ant-...">
+                  <button type="button" class="key-toggle" data-target="cfg-anthropic-key" title="Show/hide key">Show</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Timeouts -->
           <div class="settings-group">
             <div class="settings-group-title">Timeouts</div>
@@ -428,6 +459,7 @@
 
         <div class="settings-actions">
           <button id="settings-save-btn" class="btn-primary">Save to .env</button>
+          <button id="restart-agent-btn" class="btn-secondary" style="display:none">Restart Agent</button>
           <span class="settings-status" id="settings-status"></span>
         </div>
       </section>
