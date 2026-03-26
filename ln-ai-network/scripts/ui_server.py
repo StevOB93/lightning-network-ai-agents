@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import subprocess
 import sys
 import threading
 import time
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -95,6 +97,47 @@ if str(REPO_ROOT) not in sys.path:
 
 from ai.command_queue import enqueue, last_outbox, paths
 from mcp.ln_mcp_server import handle as mcp_handle
+
+# Security utilities — auth, CSRF, rate limiting, audit
+from scripts.security import (
+    HTTPRateLimiter,
+    SecurityAuditLogger,
+    check_permission,
+    create_session_token,
+    generate_csrf_token,
+    validate_csrf_token,
+    validate_session_token,
+    verify_password,
+)
+
+# ---------------------------------------------------------------------------
+# Security configuration
+# ---------------------------------------------------------------------------
+
+# When True, all API endpoints require a valid session cookie.
+# Disabled when UI_ADMIN_PASSWORD_HASH is not set (backward compatible).
+_AUTH_ENABLED = bool(os.getenv("UI_ADMIN_PASSWORD_HASH", ""))
+
+_SESSION_SECRET = os.getenv("UI_SESSION_SECRET", "")
+_SESSION_TTL = int(os.getenv("UI_SESSION_TTL_S", "3600"))
+_ADMIN_HASH = os.getenv("UI_ADMIN_PASSWORD_HASH", "")
+_VIEWER_HASH = os.getenv("UI_VIEWER_PASSWORD_HASH", "")
+_CORS_ORIGIN = os.getenv("UI_CORS_ORIGIN", "")
+_TLS_ENABLED = bool(os.getenv("UI_TLS_CERT", "") and os.getenv("UI_TLS_KEY", ""))
+
+# Paths that do NOT require authentication (static assets + login endpoint).
+_AUTH_EXEMPT_PATHS: frozenset[str] = frozenset({
+    "/api/login",
+})
+
+# Static file extensions served without auth (the login page needs these).
+_STATIC_EXTENSIONS = (".html", ".css", ".js", ".svg", ".ico")
+
+# Shared rate limiter and audit logger (created once at module level).
+_rate_limiter = HTTPRateLimiter()
+_audit_logger = SecurityAuditLogger(
+    log_path=RUNTIME_DIR / "security_audit.jsonl" if RUNTIME_DIR else None,
+)
 
 # ---------------------------------------------------------------------------
 # Named constants — keep magic numbers in one place for easy tuning
@@ -652,25 +695,113 @@ class UIHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         pass  # Suppress the default per-request access log to keep stdout clean
 
+    # ------------------------------------------------------------------
+    # Security helpers
+    # ------------------------------------------------------------------
+
+    def _send_security_headers(self) -> None:
+        """Send standard security headers on every response."""
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self' https://d3js.org; "
+            "style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; "
+            "font-src https://fonts.gstatic.com; "
+            "connect-src 'self'; "
+            "img-src 'self' data:; "
+            "frame-ancestors 'none'",
+        )
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        if _TLS_ENABLED:
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+    def _send_cors_headers(self) -> None:
+        """Send CORS headers (only when a specific origin is configured)."""
+        if _CORS_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", _CORS_ORIGIN)
+            self.send_header("Vary", "Origin")
+
+    def _get_client_ip(self) -> str:
+        """Return client IP, respecting X-Forwarded-For behind a reverse proxy."""
+        forwarded = self.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return self.client_address[0]
+
+    def _get_session_cookie(self) -> str:
+        """Extract the session token from the Cookie header."""
+        cookie_header = self.headers.get("Cookie", "")
+        if not cookie_header:
+            return ""
+        cookie: SimpleCookie[str] = SimpleCookie()
+        try:
+            cookie.load(cookie_header)
+        except Exception:
+            return ""
+        morsel = cookie.get("session")
+        return morsel.value if morsel else ""
+
+    def _check_auth(self) -> dict[str, str] | None:
+        """Validate the session cookie.
+
+        Returns ``{"user_id": ..., "role": ...}`` on success, ``None`` on
+        failure.  When auth is disabled (no password hash configured) returns
+        a synthetic admin identity so all code paths work uniformly.
+        """
+        if not _AUTH_ENABLED:
+            return {"user_id": "admin", "role": "admin"}
+        token = self._get_session_cookie()
+        if not token or not _SESSION_SECRET:
+            return None
+        return validate_session_token(token, _SESSION_SECRET)
+
+    def _check_rate_limit(self) -> bool:
+        """Check per-IP rate limit. Returns True if the request should be rejected."""
+        ip = self._get_client_ip()
+        parsed = urlparse(self.path)
+        retry_after = _rate_limiter.check(ip, self.command, parsed.path)
+        if retry_after is not None:
+            self.send_response(HTTPStatus.TOO_MANY_REQUESTS)
+            self.send_header("Retry-After", str(retry_after))
+            self._send_security_headers()
+            self.end_headers()
+            return True
+        return False
+
+    def _check_csrf(self, session_token: str) -> bool:
+        """Validate the X-CSRF-Token header for POST requests.
+
+        Returns True if CSRF validation passes (or is not required).
+        Returns False if the token is missing/invalid — caller should abort.
+        """
+        if not _AUTH_ENABLED:
+            return True
+        csrf_header = self.headers.get("X-CSRF-Token", "")
+        if not csrf_header:
+            return False
+        return validate_csrf_token(csrf_header, session_token, _SESSION_SECRET)
+
+    # ------------------------------------------------------------------
+    # Response helpers
+    # ------------------------------------------------------------------
+
     def _json(self, status: int, payload: Any) -> None:
         """
-        Send a JSON response with appropriate headers.
+        Send a JSON response with security headers.
 
         default=str ensures non-serializable types (Path, datetime, etc.) are
         converted to strings rather than raising TypeError.
-
-        Cache-Control: no-store prevents the browser from caching API responses,
-        which would cause stale data to be shown after a pipeline run completes.
-
-        CORS header allows the UI to be served from a different port during
-        development (e.g. a hot-reload dev server on :3000 talking to API on :8008).
         """
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -707,6 +838,8 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._send_cors_headers()
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -716,14 +849,34 @@ class UIHandler(BaseHTTPRequestHandler):
         Required for cross-origin POST requests (e.g. from a dev server).
         """
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token")
+        self._send_security_headers()
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
+        if self._check_rate_limit():
+            return
+
         parsed = urlparse(self.path)
         route = parsed.path
+
+        # Static files are always served (login page needs them).
+        if not route.startswith("/api/"):
+            self._serve_static(parsed.path)
+            return
+
+        # Auth gate — all /api/ endpoints require a valid session (when enabled).
+        identity = self._check_auth()
+        if identity is None:
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "Authentication required"})
+            return
+
+        # RBAC — check if the user's role has permission for this endpoint.
+        if not check_permission(identity["role"], "GET", route):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "Insufficient permissions"})
+            return
 
         if route == "/api/status":
             self._json(HTTPStatus.OK, _runtime_snapshot())
@@ -734,13 +887,13 @@ class UIHandler(BaseHTTPRequestHandler):
         elif route == "/api/network":
             self._json(HTTPStatus.OK, _extract_network_data())
         elif route == "/api/logs":
-            # Archive list — metadata only, no event content
             qs = parse_qs(parsed.query)
-            q_param = qs.get("q", [""])[0]
+            q_param = qs.get("q", [""])[0][:200]  # Max 200 chars
             status_param = qs.get("status", [""])[0]
+            if status_param and status_param not in ("ok", "partial", "failed"):
+                status_param = ""
             self._json(HTTPStatus.OK, _list_archives(q=q_param, status=status_param))
         elif route.startswith("/api/logs/"):
-            # Individual archive file — full event list
             filename = route[len("/api/logs/"):]
             result = _read_archive(filename)
             if result is None:
@@ -758,7 +911,7 @@ class UIHandler(BaseHTTPRequestHandler):
         elif route == "/api/tokens":
             self._sse_tokens()
         else:
-            self._serve_static(parsed.path)
+            self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint"})
 
     def _sse_stream(self) -> None:
         """
@@ -791,7 +944,7 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("X-Accel-Buffering", "no")  # Disable nginx proxy buffering
         self.end_headers()
 
@@ -882,7 +1035,7 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
@@ -937,14 +1090,20 @@ class UIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         """
-        Handle POST requests for /api/ask and /api/health.
+        Handle POST requests.
 
         Accepts both JSON body (Content-Type: application/json) and
         form-encoded body (fallback) so the UI can use fetch with JSON
         while curl users can also use -d 'text=...' form syntax.
         """
+        if self._check_rate_limit():
+            return
+
         parsed = urlparse(self.path)
-        MAX_CONTENT_LENGTH = 1_000_000  # 1 MB — reject oversized payloads
+        ip = self._get_client_ip()
+
+        # Read body (shared across all POST endpoints)
+        MAX_CONTENT_LENGTH = 1_000_000  # 1 MB
         length = int(self.headers.get("Content-Length", "0"))
         if length > MAX_CONTENT_LENGTH:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "Payload too large"})
@@ -953,21 +1112,113 @@ class UIHandler(BaseHTTPRequestHandler):
         data: dict[str, Any] = {}
         if raw:
             try:
-                parsed_body = json.loads(raw)  # Prefer JSON body
-                # Only accept a JSON object — lists/numbers/strings are invalid
+                parsed_body = json.loads(raw)
                 data = parsed_body if isinstance(parsed_body, dict) else {}
             except Exception:
-                # Fallback: parse as application/x-www-form-urlencoded
-                # parse_qs returns lists; take the first value for each key
                 data = {k: v[0] for k, v in parse_qs(raw).items()}
+
+        # --- Login endpoint (exempt from auth + CSRF) ---
+        if parsed.path == "/api/login":
+            password = str(data.get("password", ""))
+            if not password:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing password"})
+                return
+
+            # Try admin first, then viewer
+            user_id = ""
+            role = ""
+            if _ADMIN_HASH and verify_password(password, _ADMIN_HASH):
+                user_id, role = "admin", "admin"
+            elif _VIEWER_HASH and verify_password(password, _VIEWER_HASH):
+                user_id, role = "viewer", "viewer"
+
+            if not user_id:
+                _audit_logger.log_login_attempt(ip=ip, success=False)
+                self._json(HTTPStatus.UNAUTHORIZED, {"error": "Invalid password"})
+                return
+
+            # Create session token + CSRF token
+            session_token = create_session_token(
+                user_id, role, _SESSION_SECRET, _SESSION_TTL,
+            )
+            csrf_token = generate_csrf_token(session_token, _SESSION_SECRET)
+
+            # Build Set-Cookie header
+            cookie_parts = [
+                f"session={session_token}",
+                "HttpOnly",
+                "SameSite=Strict",
+                "Path=/",
+                f"Max-Age={_SESSION_TTL}",
+            ]
+            if _TLS_ENABLED:
+                cookie_parts.append("Secure")
+
+            _audit_logger.log_login_attempt(ip=ip, success=True, user=user_id)
+
+            body = json.dumps(
+                {"ok": True, "role": role, "csrf_token": csrf_token},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "; ".join(cookie_parts))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self._send_security_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # --- Logout endpoint (exempt from CSRF) ---
+        if parsed.path == "/api/logout":
+            cookie_parts = [
+                "session=",
+                "HttpOnly",
+                "SameSite=Strict",
+                "Path=/",
+                "Max-Age=0",
+            ]
+            body = json.dumps({"ok": True}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", "; ".join(cookie_parts))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self._send_security_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # --- Auth gate for all other POST endpoints ---
+        identity = self._check_auth()
+        if identity is None:
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "Authentication required"})
+            return
+
+        # CSRF validation
+        session_token = self._get_session_cookie()
+        if not self._check_csrf(session_token):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "CSRF token missing or invalid"})
+            return
+
+        # RBAC
+        if not check_permission(identity["role"], "POST", parsed.path):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "Insufficient permissions"})
+            return
+
+        user = identity.get("user_id", "")
 
         if parsed.path == "/api/ask":
             prompt = str(data.get("text", "")).strip()
             if not prompt:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "Missing 'text' prompt"})
                 return
-            # Enqueue with use_llm=True to trigger the full 4-stage pipeline.
-            # strategy (cheap/fast/detailed/max_effort) flows through to the Planner.
+            if len(prompt) > 10_000:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "Prompt too long (max 10,000 chars)"})
+                return
             meta: dict[str, Any] = {"kind": "freeform", "use_llm": True}
             strategy = str(data.get("strategy", "")).strip()
             if strategy:
@@ -976,25 +1227,34 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"queued": "ask", "msg": msg})
 
         elif parsed.path == "/api/health":
-            # Health check: the pipeline processes this immediately and responds
-            # with "Pipeline is running." — useful for monitoring scripts.
             msg = enqueue("health_check", meta={"kind": "health_check", "include_raw": False})
             self._json(HTTPStatus.OK, {"queued": "health_check", "msg": msg})
 
         elif parsed.path == "/api/config":
-            # Update .env with the provided key-value pairs (allowlisted keys only).
             if not isinstance(data, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "Expected JSON object"})
                 return
-            _write_config({str(k): str(v) for k, v in data.items()})
-            self._json(HTTPStatus.OK, {"saved": [k for k in data if k in _CONFIG_KEYS]})
+            # Validate config values: max 500 chars, no control characters
+            sanitized: dict[str, str] = {}
+            for k, v in data.items():
+                sv = str(v)
+                if len(sv) > 500:
+                    continue
+                # Reject control characters (except normal whitespace)
+                if any(ord(c) < 32 and c not in ('\n', '\r', '\t') for c in sv):
+                    continue
+                sanitized[k] = sv
+            _write_config(sanitized)
+            saved_keys = [k for k in sanitized if k in _CONFIG_KEYS]
+            _audit_logger.log_config_change(user=user, keys=saved_keys, ip=ip)
+            self._json(HTTPStatus.OK, {"saved": saved_keys})
 
         elif parsed.path == "/api/restart_agent":
-            # Restart just the AI agent process (preserves inbox/outbox).
             restart_script = REPO_ROOT / "scripts" / "restart_agent.sh"
             if not restart_script.exists():
                 self._json(HTTPStatus.NOT_FOUND, {"error": "restart_agent.sh not found"})
                 return
+            _audit_logger.log_admin_action(user=user, action="restart_agent", ip=ip)
             self._json(HTTPStatus.OK, {"status": "restart_initiated"})
 
             def _do_restart_agent() -> None:
@@ -1011,12 +1271,11 @@ class UIHandler(BaseHTTPRequestHandler):
             threading.Thread(target=_do_restart_agent, daemon=True).start()
 
         elif parsed.path == "/api/shutdown":
-            # Run shutdown.sh in a background thread so the HTTP response is sent
-            # before the process tree is terminated.
             shutdown_script = REPO_ROOT / "scripts" / "shutdown.sh"
             if not shutdown_script.exists():
                 self._json(HTTPStatus.NOT_FOUND, {"error": "shutdown.sh not found"})
                 return
+            _audit_logger.log_admin_action(user=user, action="shutdown", ip=ip)
             self._json(HTTPStatus.OK, {"status": "shutdown_initiated"})
 
             def _do_shutdown() -> None:
@@ -1042,6 +1301,7 @@ class UIHandler(BaseHTTPRequestHandler):
             if not shutdown_script.exists() or not start_script.exists():
                 self._json(HTTPStatus.NOT_FOUND, {"error": "shutdown.sh or 1.start.sh not found"})
                 return
+            _audit_logger.log_admin_action(user=user, action="restart", ip=ip)
             self._json(HTTPStatus.OK, {"status": "restart_initiated"})
 
             def _do_restart() -> None:
@@ -1062,13 +1322,11 @@ class UIHandler(BaseHTTPRequestHandler):
             threading.Thread(target=_do_restart, daemon=True).start()
 
         elif parsed.path == "/api/fresh":
-            # Archive + clear all data, then restart the agent fresh.
-            # Uses restart_agent.sh with the "fresh" flag which archives
-            # inbox/outbox/history/archive.jsonl and resets cursors.
             restart_agent = REPO_ROOT / "scripts" / "restart_agent.sh"
             if not restart_agent.exists():
                 self._json(HTTPStatus.NOT_FOUND, {"error": "restart_agent.sh not found"})
                 return
+            _audit_logger.log_admin_action(user=user, action="fresh_restart", ip=ip)
             self._json(HTTPStatus.OK, {"status": "fresh_restart_initiated"})
 
             def _do_fresh() -> None:
@@ -1102,11 +1360,32 @@ def main() -> None:
 
     ThreadingHTTPServer spawns a new thread per request, which allows the
     SSE endpoint to block without preventing other API calls from being served.
+
+    TLS: when UI_TLS_CERT and UI_TLS_KEY are set, the server wraps its socket
+    with an SSL context and serves HTTPS instead of HTTP.
     """
     host = os.getenv("UI_HOST", "127.0.0.1")
     port = int(os.getenv("UI_PORT", "8008"))
     server = ThreadingHTTPServer((host, port), UIHandler)
-    print(json.dumps({"kind": "ui_server_start", "url": f"http://{host}:{port}"}), flush=True)
+
+    # TLS support — wrap socket when cert/key paths are configured.
+    tls_cert = os.getenv("UI_TLS_CERT", "")
+    tls_key = os.getenv("UI_TLS_KEY", "")
+    protocol = "http"
+    if tls_cert and tls_key:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(tls_cert, tls_key)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        protocol = "https"
+
+    auth_status = "enabled" if _AUTH_ENABLED else "disabled"
+    print(json.dumps({
+        "kind": "ui_server_start",
+        "url": f"{protocol}://{host}:{port}",
+        "auth": auth_status,
+        "tls": protocol == "https",
+    }), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

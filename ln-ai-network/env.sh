@@ -9,6 +9,8 @@ if [[ -f "$PROJECT_ROOT/.env" ]]; then
   # shellcheck disable=SC1090
   source "$PROJECT_ROOT/.env"
   set +a
+  # Restrict .env to owner-only (contains API keys and password hashes)
+  chmod 600 "$PROJECT_ROOT/.env" 2>/dev/null || true
 fi
 
 # Deterministic paths

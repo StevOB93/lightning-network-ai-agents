@@ -42,6 +42,22 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <!-- Login overlay — shown when auth is enabled and no valid session exists -->
+  <div id="login-overlay" class="login-overlay" style="display:none">
+    <div class="login-card">
+      <div class="login-header">
+        <span class="bolt">&#9889;</span>
+        <h1>Lightning Agent</h1>
+      </div>
+      <p class="login-subtitle">Enter your password to access the dashboard.</p>
+      <form id="login-form" autocomplete="off">
+        <input id="login-password" type="password" class="login-input" placeholder="Password" autocomplete="current-password" required>
+        <button type="submit" id="login-btn" class="btn-primary login-btn">Sign In</button>
+      </form>
+      <div id="login-error" class="login-error"></div>
+    </div>
+  </div>
+
   <div class="page-shell">
 
     <!-- ── Status bar ── persistent across all tabs ── -->

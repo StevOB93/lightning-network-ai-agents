@@ -3,6 +3,16 @@
 // Communicates with the Python ui_server.py via REST and Server-Sent Events (SSE).
 
 // ---------------------------------------------------------------------------
+// Auth state
+// ---------------------------------------------------------------------------
+// CSRF token received from the server on login. Sent as X-CSRF-Token header
+// on all POST requests. Empty when auth is disabled (server allows all).
+let _csrfToken = "";
+
+// True once the login check at startup determines auth is NOT required.
+let _authDisabled = false;
+
+// ---------------------------------------------------------------------------
 // DOM refs
 // ---------------------------------------------------------------------------
 // Short alias for getElementById — keeps element lookups terse throughout the file.
@@ -196,13 +206,20 @@ function setLog(text, isError = false) {
 /**
  * POST JSON to a URL and return the parsed response.
  * Throws an Error with the server's error message on non-2xx status.
+ * Includes CSRF token when available. Redirects to login on 401.
  */
 async function postJson(url, payload) {
+  const headers = { "Content-Type": "application/json" };
+  if (_csrfToken) headers["X-CSRF-Token"] = _csrfToken;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(payload),
   });
+  if (res.status === 401) {
+    showLoginOverlay();
+    throw new Error("Session expired — please log in again");
+  }
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
@@ -885,6 +902,7 @@ function renderNetwork(data) {
 /** Fetch runtime status and update the status bar + queue panels. */
 async function fetchStatus() {
   const res = await fetch("/api/status");
+  if (res.status === 401) { showLoginOverlay(); return; }
   const data = await res.json();
   updateStatusBar(data);
   renderQueue(inboxList, inboxCount, data.recent_inbox, "Req", _inboxClearTs);
@@ -1879,33 +1897,140 @@ function initTabs() {
 }
 
 // ---------------------------------------------------------------------------
+// Authentication — login overlay + session management
+// ---------------------------------------------------------------------------
+
+/**
+ * Show the login overlay and hide the main UI.
+ * Called when the server returns 401 on any API call.
+ */
+function showLoginOverlay() {
+  const overlay = $("login-overlay");
+  const shell = document.querySelector(".page-shell");
+  if (overlay) overlay.style.display = "";
+  if (shell) shell.style.display = "none";
+}
+
+/**
+ * Hide the login overlay and show the main UI.
+ */
+function hideLoginOverlay() {
+  const overlay = $("login-overlay");
+  const shell = document.querySelector(".page-shell");
+  if (overlay) overlay.style.display = "none";
+  if (shell) shell.style.display = "";
+}
+
+/**
+ * Attempt to log in with the given password.
+ * On success: stores the CSRF token, hides the overlay, and boots the app.
+ */
+async function doLogin(password) {
+  const loginBtn = $("login-btn");
+  const loginError = $("login-error");
+  loginBtn.disabled = true;
+  loginError.textContent = "";
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      loginError.textContent = data.error || "Login failed";
+      return;
+    }
+    _csrfToken = data.csrf_token || "";
+    hideLoginOverlay();
+    bootApp();
+  } catch (e) {
+    loginError.textContent = "Connection error: " + e.message;
+  } finally {
+    loginBtn.disabled = false;
+  }
+}
+
+/**
+ * Log out: POST /api/logout, clear CSRF token, show login overlay.
+ */
+async function doLogout() {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } catch (_) {}
+  _csrfToken = "";
+  showLoginOverlay();
+}
+
+/**
+ * Check if auth is required. If the server returns 401 on /api/status,
+ * show the login overlay. Otherwise, proceed directly to booting the app.
+ */
+async function checkAuth() {
+  try {
+    const res = await fetch("/api/status");
+    if (res.status === 401) {
+      showLoginOverlay();
+      return;
+    }
+    // Auth is either disabled or we have a valid session cookie already.
+    _authDisabled = true;
+    hideLoginOverlay();
+    bootApp();
+  } catch (_) {
+    // Server unreachable — try to boot anyway (SSE will reconnect).
+    hideLoginOverlay();
+    bootApp();
+  }
+}
+
+// Wire up the login form
+const _loginForm = $("login-form");
+if (_loginForm) {
+  _loginForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const pw = $("login-password").value;
+    if (pw) doLogin(pw);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 
+let _appBooted = false;
+
+/**
+ * Boot the main application — load initial data, start SSE streams, and
+ * set up polling fallbacks. Called once after auth check succeeds.
+ */
+function bootApp() {
+  if (_appBooted) return;
+  _appBooted = true;
+
+  // Load initial data immediately so the UI isn't blank on first render.
+  refreshAll().catch(e => setLog(e.message, true));
+
+  // Load metrics on page load
+  fetchAndRenderMetrics().catch(() => {});
+
+  // Open the SSE stream for live updates.
+  startSSE();
+
+  // Open the token streaming SSE for live summarizer output.
+  startTokenSSE();
+
+  // Polling fallback intervals
+  setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchStatus().catch(() => {}); }, POLL_STATUS_MS);
+  setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchPipelineResult().catch(() => {}); }, POLL_PIPELINE_MS);
+  setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchTrace().catch(() => {}); }, POLL_TRACE_MS);
+  setInterval(() => { if (!_shutdownRequested) fetchNetwork().catch(() => {}); }, POLL_NETWORK_MS);
+}
+
 initTabs();
 
-// Load initial data immediately so the UI isn't blank on first render.
-// Any fetch error is shown in the action log (non-blocking).
-refreshAll().catch(e => setLog(e.message, true));
-
-// Load metrics on page load
-fetchAndRenderMetrics().catch(() => {});
-
-// Open the SSE stream for live updates.
-startSSE();
-
-// Open the token streaming SSE for live summarizer output.
-startTokenSSE();
-
-// Polling fallback intervals — only fire when SSE is not delivering updates.
-// This handles browsers that don't support EventSource or networks that block SSE.
-setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchStatus().catch(() => {}); }, POLL_STATUS_MS);
-setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchPipelineResult().catch(() => {}); }, POLL_PIPELINE_MS);
-setInterval(() => { if (!_sseActive && !_shutdownRequested) fetchTrace().catch(() => {}); }, POLL_TRACE_MS);
-
-// Network graph always polls independently — it's infrequent and not
-// pushed via SSE because network topology rarely changes mid-session.
-setInterval(() => { if (!_shutdownRequested) fetchNetwork().catch(() => {}); }, POLL_NETWORK_MS);
+// Check auth status on page load — either shows login or boots the app.
+checkAuth();
 
 // ---------------------------------------------------------------------------
 // Copy buttons (global delegated listener)

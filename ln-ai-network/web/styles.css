@@ -1651,3 +1651,84 @@ input.clear-confirm-input {
 }
 .clear-status.ok    { color: var(--accent-2); }
 .clear-status.error { color: var(--danger); }
+
+/* ── Login overlay ──
+   Full-screen backdrop shown when auth is enabled and session is missing.
+   Centers a card with password input and submit button.                   */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-card {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 40px 36px 32px;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+}
+
+.login-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.login-header .bolt {
+  font-size: 1.6rem;
+}
+
+.login-header h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0;
+}
+
+.login-subtitle {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0 0 24px;
+}
+
+.login-input {
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 0.92rem;
+  font-family: "IBM Plex Mono", monospace;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  outline: none;
+  box-sizing: border-box;
+}
+
+.login-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.login-btn {
+  width: 100%;
+  margin-top: 14px;
+  padding: 10px;
+  font-size: 0.92rem;
+}
+
+.login-error {
+  margin-top: 12px;
+  font-size: 0.82rem;
+  color: var(--danger);
+  min-height: 1.2em;
+}
