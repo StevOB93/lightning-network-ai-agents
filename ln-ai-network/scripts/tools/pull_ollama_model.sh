@@ -103,9 +103,10 @@ OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 if ! curl -sf "${OLLAMA_BASE_URL}/" >/dev/null 2>&1; then
   echo "[INFO] Starting Ollama server in background..."
   ollama serve &
+  # shellcheck disable=SC2034
   OLLAMA_PID=$!
   # Wait for it to be ready (up to 15s)
-  for i in $(seq 1 15); do
+  for _ in $(seq 1 15); do
     sleep 1
     if curl -sf "${OLLAMA_BASE_URL}/" >/dev/null 2>&1; then
       break

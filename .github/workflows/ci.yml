@@ -27,6 +27,22 @@ jobs:
       - name: Ruff check
         run: ruff check ai/ mcp/ scripts/security.py scripts/ui_server.py
 
+  shellcheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        run: |
+          find ln-ai-network -name '*.sh' \
+            -not -path '*/\.venv/*' \
+            -not -path '*/node_modules/*' \
+            -print0 | xargs -0 shellcheck --severity=warning
+
   test:
     runs-on: ubuntu-latest
     defaults:
@@ -42,7 +58,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+        run: pip install -r requirements.txt pytest pytest-cov pytest-playwright
 
-      - name: Run tests
-        run: python -m pytest ai/tests/ -v --tb=short
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run tests with coverage
+        run: python -m pytest ai/tests/ -v --tb=short --cov=ai --cov=scripts --cov-report=term-missing --cov-report=html:coverage-html
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ln-ai-network/coverage-html/

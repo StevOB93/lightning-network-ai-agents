@@ -37,8 +37,7 @@ _kill_and_wait() {
 
   # Poll until the process is actually gone (bash's `wait` only works for
   # child processes of the current shell; polling is reliable for any PID).
-  local i
-  for i in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     if ! kill -0 "${pid}" >/dev/null 2>&1; then
       echo "[AGENT] Process ${pid} exited."
       return 0
