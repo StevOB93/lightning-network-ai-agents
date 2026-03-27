@@ -953,9 +953,24 @@ async function fetchTrace() {
 
 /** Fetch network topology and re-render the D3 force graph. */
 async function fetchNetwork() {
-  const res = await fetch("/api/network");
-  const data = await res.json();
-  renderNetwork(data);
+  const viz = $("network-viz");
+  try {
+    const res = await fetch("/api/network");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    renderNetwork(data);
+    // Clear any previous error overlay
+    const errEl = viz?.querySelector(".network-error");
+    if (errEl) errEl.remove();
+  } catch (err) {
+    // Show an error message inside the graph container instead of a blank graph
+    if (viz && !viz.querySelector(".network-error")) {
+      const msg = document.createElement("div");
+      msg.className = "network-error";
+      msg.textContent = "Could not load network data — check that nodes are running.";
+      viz.appendChild(msg);
+    }
+  }
 }
 
 /**

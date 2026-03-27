@@ -60,6 +60,67 @@ _VERIFY_TOOL: Dict[str, str] = {
 }
 
 
+def _friendly_error(stage: str, raw: str) -> str:
+    """Translate technical pipeline errors into user-friendly messages.
+
+    Returns a human-readable string suitable for ``human_summary``.  The raw
+    error string is appended in parentheses so debug info is never lost.
+    """
+    low = raw.lower()
+
+    # --- LLM auth issues ---
+    if "autherror" in low or "invalid api key" in low or "invalid credentials" in low:
+        return (
+            f"Your LLM API key appears to be invalid or missing — "
+            f"check the key in Settings. ({raw})"
+        )
+
+    # --- LLM rate limits ---
+    if "ratelimit" in low or "rate limit" in low or "429" in low:
+        return (
+            f"The LLM provider is rate-limiting requests — "
+            f"wait a moment and try again. ({raw})"
+        )
+
+    # --- LLM transient / server errors ---
+    if "transientapierror" in low or "server error" in low or "502" in low or "503" in low:
+        return (
+            f"The LLM service is temporarily unavailable — "
+            f"try again in a few seconds. ({raw})"
+        )
+
+    # --- MCP / Lightning node timeouts ---
+    if "mcp timeout" in low or "mcptimeouterror" in low or "tool_timeout" in low:
+        return (
+            f"A Lightning node did not respond in time — "
+            f"check that nodes are running (scripts/1.start.sh). ({raw})"
+        )
+
+    # --- MCP client crash / subprocess errors ---
+    if "mcp client error" in low or "subprocess" in low or "connection refused" in low:
+        return (
+            f"Could not reach the MCP server — "
+            f"check that the MCP server and Lightning nodes are running. ({raw})"
+        )
+
+    # --- JSON parse failures from translator/planner ---
+    if "json" in low and ("parse" in low or "decode" in low):
+        return (
+            f"The LLM returned an unparseable response — "
+            f"try rephrasing your prompt. ({raw})"
+        )
+
+    # --- Exhausted retries ---
+    if "failed after" in low and "attempts" in low:
+        return (
+            f"The {stage} could not produce a valid result after multiple attempts — "
+            f"try simplifying your prompt. ({raw})"
+        )
+
+    # --- Fallback: just capitalize the stage name ---
+    return f"{stage.capitalize()} error: {raw}"
+
+
 # =============================================================================
 # Pipeline coordinator
 # =============================================================================
@@ -116,6 +177,9 @@ class PipelineCoordinator:
 
         # Shared trace logger — all four stages write to the same trace.log file
         self.trace = TraceLogger(agent_dir / "trace.log")
+        # Recover any un-archived trace from a previous crash, then rotate old archives
+        self.trace.recover_on_startup()
+        self.trace.rotate_archives(max_files=_env_int("MAX_ARCHIVE_FILES", 200))
 
         # Instantiate each stage controller, injecting shared dependencies
         self.translator = Translator(TranslatorConfig.from_env(), translator_backend, self.trace)
@@ -592,7 +656,7 @@ class PipelineCoordinator:
             return PipelineResult(
                 request_id=req_id, ts=ts, success=False,
                 stage_failed="translator", intent=None, plan=None,
-                step_results=[], human_summary=f"Failed to parse intent: {e}",
+                step_results=[], human_summary=_friendly_error("translator", str(e)),
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
         t_translate = (time.monotonic() - _t0) * 1000
@@ -621,7 +685,7 @@ class PipelineCoordinator:
             return PipelineResult(
                 request_id=req_id, ts=ts, success=False,
                 stage_failed="planner", intent=intent, plan=None,
-                step_results=[], human_summary=f"Failed to create execution plan: {e}",
+                step_results=[], human_summary=_friendly_error("planner", str(e)),
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
         t_plan = (time.monotonic() - _t0) * 1000
@@ -650,7 +714,7 @@ class PipelineCoordinator:
                 request_id=req_id, ts=ts, success=False,
                 stage_failed="executor", intent=intent, plan=plan,
                 step_results=e.partial_results,  # Show partial progress in the UI
-                human_summary=f"Execution failed: {e}",
+                human_summary=_friendly_error("executor", str(e)),
                 error=str(e), pipeline_build=PIPELINE_BUILD,
             )
         t_execute = (time.monotonic() - _t0) * 1000

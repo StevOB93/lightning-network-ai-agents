@@ -225,7 +225,7 @@ ln-ai-network/
     controllers/         # Pipeline stages (translator, planner, executor, summarizer)
     core/                # Infrastructure (config, rate limiter, backoff, registry)
     llm/                 # LLM backend adapters (openai, gemini, ollama, claude)
-    tests/               # Test suite (419 tests)
+    tests/               # Test suite (439 tests)
     pipeline.py          # PipelineCoordinator — main orchestrator
     command_queue.py     # File-based JSONL message bus
   mcp/                   # MCP server (28 tools: btc_*, ln_*, network_health)

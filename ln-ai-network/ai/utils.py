@@ -254,6 +254,55 @@ class TraceLogger:
             return None
         return dest
 
+    def recover_on_startup(self) -> Optional[Path]:
+        """Save any leftover trace.log from a previous crash before it's overwritten.
+
+        Called once at pipeline startup.  If trace.log exists and is non-empty,
+        it means the previous run crashed before ``archive()`` could be called.
+        We archive it with status ``recovered`` so the data isn't lost when the
+        next ``reset()`` truncates the file.
+
+        Returns the archive path on success, None if there was nothing to save.
+        """
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return None
+        # Try to extract req_id and ts from the first line (prompt_start header)
+        req_id = 0
+        start_ts = int(time.time())
+        try:
+            with self.path.open("r", encoding="utf-8") as f:
+                first = f.readline().strip()
+                if first:
+                    header = json.loads(first)
+                    req_id = int(header.get("req_id", 0))
+                    start_ts = int(header.get("ts", start_ts))
+        except Exception:
+            pass
+        return self.archive(req_id, start_ts, "recovered")
+
+    def rotate_archives(self, max_files: int = 200) -> int:
+        """Delete the oldest archive files when the count exceeds *max_files*.
+
+        Returns the number of files deleted.  Archives are sorted by name
+        (lexicographic = chronological because filenames are zero-padded).
+        Best-effort — individual delete failures are silently ignored.
+        """
+        logs_dir = self.path.parent / "logs"
+        if not logs_dir.is_dir():
+            return 0
+        archives = sorted(logs_dir.glob("*.jsonl"))
+        excess = len(archives) - max_files
+        if excess <= 0:
+            return 0
+        deleted = 0
+        for old in archives[:excess]:
+            try:
+                old.unlink()
+                deleted += 1
+            except Exception:
+                pass
+        return deleted
+
 
 # =============================================================================
 # Path helpers

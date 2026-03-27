@@ -25,9 +25,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import time
+
 from ai.core.config import AgentConfig
 from ai.models import IntentBlock, PipelineResult
-from ai.pipeline import PIPELINE_BUILD, PipelineCoordinator, _VERIFY_TOOL
+from ai.pipeline import PIPELINE_BUILD, PipelineCoordinator, _VERIFY_TOOL, _friendly_error
+from ai.utils import TraceLogger
 
 
 # =============================================================================
@@ -453,3 +456,157 @@ class TestPipelineBuild:
         assert "planner" in PIPELINE_BUILD
         assert "executor" in PIPELINE_BUILD
         assert "summarizer" in PIPELINE_BUILD
+
+
+# =============================================================================
+# _friendly_error() — user-facing error message translation
+# =============================================================================
+
+class TestFriendlyError:
+    """Verify _friendly_error maps technical errors to helpful messages."""
+
+    def test_auth_error(self):
+        msg = _friendly_error("translator", "LLM error during translation: AuthError: Invalid API key")
+        assert "API key" in msg
+        assert "Settings" in msg
+        assert "AuthError" in msg  # raw preserved in parens
+
+    def test_rate_limit_error(self):
+        msg = _friendly_error("planner", "LLM error during planning: RateLimitError: 429 Too Many Requests")
+        assert "rate-limiting" in msg
+        assert "wait" in msg
+
+    def test_transient_api_error(self):
+        msg = _friendly_error("translator", "TransientAPIError: 503 Service Unavailable")
+        assert "temporarily unavailable" in msg
+
+    def test_mcp_timeout(self):
+        msg = _friendly_error("executor", "Step 1 (ln_listfunds) failed: MCP timeout (30s) for tool ln_listfunds")
+        assert "Lightning node" in msg
+        assert "not respond" in msg
+
+    def test_mcp_client_crash(self):
+        msg = _friendly_error("executor", "MCP client error: ConnectionRefusedError: connection refused")
+        assert "MCP server" in msg
+
+    def test_json_parse_failure(self):
+        msg = _friendly_error("translator", "JSON decode error: Expecting value: line 1 column 1")
+        assert "unparseable" in msg
+        assert "rephras" in msg
+
+    def test_exhausted_retries(self):
+        msg = _friendly_error("translator", "Translator failed after 3 attempts. Last error: invalid JSON")
+        assert "multiple attempts" in msg
+        assert "simplif" in msg
+
+    def test_fallback_unknown_error(self):
+        msg = _friendly_error("planner", "some obscure error nobody anticipated")
+        assert msg.startswith("Planner error:")
+        assert "some obscure error" in msg
+
+    def test_raw_error_always_preserved(self):
+        """The raw error string should always appear in the output for debugging."""
+        raw = "LLM error during translation: AuthError: sk-abc...xyz invalid"
+        msg = _friendly_error("translator", raw)
+        assert raw in msg
+
+    def test_case_insensitive_matching(self):
+        msg = _friendly_error("executor", "MCPTIMEOUTERROR: deadline exceeded")
+        assert "Lightning node" in msg
+
+
+# =============================================================================
+# TraceLogger — recover_on_startup and rotate_archives
+# =============================================================================
+
+class TestTraceLoggerRecovery:
+    """Tests for TraceLogger.recover_on_startup()."""
+
+    def test_recover_empty_trace(self, tmp_path):
+        trace = TraceLogger(tmp_path / "trace.log")
+        # No file exists — nothing to recover
+        assert trace.recover_on_startup() is None
+
+    def test_recover_zero_byte_trace(self, tmp_path):
+        trace_path = tmp_path / "trace.log"
+        trace_path.write_text("")
+        trace = TraceLogger(trace_path)
+        assert trace.recover_on_startup() is None
+
+    def test_recover_non_empty_trace(self, tmp_path):
+        trace_path = tmp_path / "trace.log"
+        header = {"event": "prompt_start", "req_id": 7, "ts": 1710000000}
+        trace_path.write_text(json.dumps(header) + "\n")
+        trace = TraceLogger(trace_path)
+        result = trace.recover_on_startup()
+        assert result is not None
+        assert result.name.startswith("0007_")
+        assert result.name.endswith("_recovered.jsonl")
+        assert result.exists()
+
+    def test_recover_with_corrupt_header(self, tmp_path):
+        trace_path = tmp_path / "trace.log"
+        trace_path.write_text("not json\n")
+        trace = TraceLogger(trace_path)
+        # Should still archive even with unparseable header (uses fallback req_id=0)
+        result = trace.recover_on_startup()
+        assert result is not None
+        assert "_recovered.jsonl" in result.name
+
+    def test_recover_preserves_content(self, tmp_path):
+        trace_path = tmp_path / "trace.log"
+        lines = [
+            json.dumps({"event": "prompt_start", "req_id": 5, "ts": 1710000000}),
+            json.dumps({"event": "stage_timing", "req_id": 5}),
+        ]
+        trace_path.write_text("\n".join(lines) + "\n")
+        trace = TraceLogger(trace_path)
+        result = trace.recover_on_startup()
+        assert result.read_text() == trace_path.read_text()
+
+
+class TestTraceLoggerRotation:
+    """Tests for TraceLogger.rotate_archives()."""
+
+    def _create_archives(self, logs_dir: Path, count: int) -> list:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        files = []
+        for i in range(count):
+            f = logs_dir / f"{i:04d}_20260320-{i:06d}_ok.jsonl"
+            f.write_text("{}\n")
+            files.append(f)
+        return files
+
+    def test_no_rotation_under_limit(self, tmp_path):
+        trace = TraceLogger(tmp_path / "trace.log")
+        self._create_archives(tmp_path / "logs", 5)
+        assert trace.rotate_archives(max_files=10) == 0
+
+    def test_no_rotation_at_limit(self, tmp_path):
+        trace = TraceLogger(tmp_path / "trace.log")
+        self._create_archives(tmp_path / "logs", 10)
+        assert trace.rotate_archives(max_files=10) == 0
+
+    def test_deletes_oldest_over_limit(self, tmp_path):
+        trace = TraceLogger(tmp_path / "trace.log")
+        files = self._create_archives(tmp_path / "logs", 15)
+        deleted = trace.rotate_archives(max_files=10)
+        assert deleted == 5
+        # Oldest 5 should be gone, newest 10 remain
+        for f in files[:5]:
+            assert not f.exists()
+        for f in files[5:]:
+            assert f.exists()
+
+    def test_no_logs_dir(self, tmp_path):
+        trace = TraceLogger(tmp_path / "trace.log")
+        # logs/ doesn't exist — should return 0, not error
+        assert trace.rotate_archives(max_files=10) == 0
+
+    def test_rotation_with_max_one(self, tmp_path):
+        trace = TraceLogger(tmp_path / "trace.log")
+        files = self._create_archives(tmp_path / "logs", 5)
+        deleted = trace.rotate_archives(max_files=1)
+        assert deleted == 4
+        remaining = list((tmp_path / "logs").glob("*.jsonl"))
+        assert len(remaining) == 1
