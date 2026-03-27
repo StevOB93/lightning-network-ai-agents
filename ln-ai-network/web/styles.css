@@ -1797,3 +1797,22 @@ input.clear-confirm-input {
   color: var(--danger);
   min-height: 1.2em;
 }
+
+/* ─── x402 Payment overlay ─── */
+.x402-details { margin: 16px 0; text-align: left; }
+.x402-row { margin: 6px 0; font-size: 0.88rem; }
+.x402-label { color: var(--text-dim); }
+.x402-invoice-box { margin: 12px 0; }
+.x402-invoice-box label { display: block; font-size: 0.78rem; color: var(--text-dim); margin-bottom: 4px; }
+.x402-invoice-box textarea {
+  width: 100%; resize: none; font-family: var(--mono);
+  font-size: 0.78rem; background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px;
+}
+.x402-invoice-box .btn-sm {
+  margin-top: 6px; padding: 4px 12px; font-size: 0.78rem;
+  background: var(--accent-dim); color: var(--accent); border: none;
+  border-radius: var(--radius); cursor: pointer;
+}
+.x402-invoice-box .btn-sm:hover { background: var(--accent); color: var(--bg); }

@@ -118,6 +118,7 @@ from scripts.security import (
     validate_session_token,
     verify_password,
 )
+from scripts.x402 import X402Paywall
 
 # ---------------------------------------------------------------------------
 # Security configuration
@@ -147,6 +148,12 @@ _rate_limiter = HTTPRateLimiter()
 _audit_logger = SecurityAuditLogger(
     log_path=RUNTIME_DIR / "security_audit.jsonl" if RUNTIME_DIR else None,
 )
+
+# ---------------------------------------------------------------------------
+# x402 Payment Gateway configuration
+# ---------------------------------------------------------------------------
+_X402_ENABLED = bool(os.getenv("X402_ENABLED", ""))
+_x402_paywall: X402Paywall | None = None  # Initialized at startup when enabled
 
 # ---------------------------------------------------------------------------
 # Named constants — keep magic numbers in one place for easy tuning
@@ -561,6 +568,7 @@ def _runtime_snapshot() -> dict[str, Any]:
         "node_count": node_count,       # Number of Lightning nodes configured
         "multi_agent": multi_agent,     # True when MULTI_AGENT=1
         "agents": agents,              # Per-agent online status (multi-agent only)
+        "x402_enabled": _X402_ENABLED and _x402_paywall is not None,
     }
 
 
@@ -903,6 +911,13 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.FORBIDDEN, {"error": "Insufficient permissions"})
             return
 
+        # x402 paywall — require Lightning payment for configured endpoints.
+        if _X402_ENABLED and _x402_paywall:
+            x402_result = _x402_paywall.check("GET", route, dict(self.headers))
+            if not x402_result.allowed:
+                self._json(HTTPStatus(x402_result.status_code), x402_result.response_body)
+                return
+
         if route == "/api/status":
             self._json(HTTPStatus.OK, _runtime_snapshot())
         elif route == "/api/pipeline_result":
@@ -1234,6 +1249,13 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.FORBIDDEN, {"error": "Insufficient permissions"})
             return
 
+        # x402 paywall
+        if _X402_ENABLED and _x402_paywall:
+            x402_result = _x402_paywall.check("POST", parsed.path, dict(self.headers))
+            if not x402_result.allowed:
+                self._json(HTTPStatus(x402_result.status_code), x402_result.response_body)
+                return
+
         user = identity.get("user_id", "")
 
         if parsed.path == "/api/ask":
@@ -1421,12 +1443,39 @@ def main() -> None:
         server.socket = ctx.wrap_socket(server.socket, server_side=True)
         protocol = "https"
 
+    # x402 paywall — initialize when enabled.
+    global _x402_paywall
+    if _X402_ENABLED:
+        # Build endpoint price map from env vars (in millisatoshis).
+        _x402_prices: dict[str, int] = {}
+        for var, key in [
+            ("X402_ASK_COST_MSAT",     "POST /api/ask"),
+            ("X402_NETWORK_COST_MSAT", "GET /api/network"),
+            ("X402_TRACE_COST_MSAT",   "GET /api/trace"),
+        ]:
+            val = os.getenv(var, "")
+            if val:
+                _x402_prices[key] = int(val)
+
+        if _x402_prices:
+            # Import the MCP invoice function lazily — only needed when x402 is on.
+            sys.path.insert(0, str(REPO_ROOT))
+            from mcp.ln_mcp_server import ln_invoice as _ln_invoice
+            _x402_paywall = X402Paywall(
+                endpoint_prices=_x402_prices,
+                node=int(os.getenv("X402_INVOICE_NODE", "1")),
+                invoice_expiry_s=int(os.getenv("X402_INVOICE_EXPIRY_S", "600")),
+                create_invoice=_ln_invoice,
+            )
+
     auth_status = "enabled" if _AUTH_ENABLED else "disabled"
+    x402_status = "enabled" if _x402_paywall else "disabled"
     print(json.dumps({
         "kind": "ui_server_start",
         "url": f"{protocol}://{host}:{port}",
         "auth": auth_status,
         "tls": protocol == "https",
+        "x402": x402_status,
     }), flush=True)
     try:
         server.serve_forever()

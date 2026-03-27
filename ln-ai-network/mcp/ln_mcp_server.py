@@ -246,6 +246,8 @@ def list_tools() -> Dict[str, Any]:
         "ln_openchannel",
         "ln_invoice",
         "ln_pay",
+        "ln_listinvoices",
+        "ln_waitinvoice",
     ]
     return {"ok": True, "payload": {"tools": tools, "count": len(tools)}}
 
@@ -597,6 +599,29 @@ def ln_pay(
     return _run_json(cmd, cfg.cmd_timeout_s)
 
 
+def ln_listinvoices(node: Union[int, str], label: Optional[str] = None) -> Dict[str, Any]:
+    """List invoices on a Lightning node, optionally filtered by label."""
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    cmd = _ln_base(cfg, nd) + ["listinvoices"]
+    if label:
+        cmd.append(label)
+    return _run_json(cmd, cfg.cmd_timeout_s)
+
+
+def ln_waitinvoice(node: Union[int, str], label: str) -> Dict[str, Any]:
+    """Block until an invoice identified by *label* is paid (or timeout).
+
+    Core Lightning's ``waitinvoice`` blocks until the invoice transitions to
+    ``paid``.  We use a generous timeout (2x the normal command timeout) since
+    the caller may need to wait for an external payment to arrive.
+    """
+    cfg = load_config()
+    nd = _require_node_dir(cfg, node)
+    timeout = cfg.cmd_timeout_s * 2  # extra time for payment to arrive
+    return _run_json(_ln_base(cfg, nd) + ["waitinvoice", label], timeout)
+
+
 def network_health() -> Dict[str, Any]:
     cfg = load_config()
 
@@ -835,6 +860,10 @@ def handle(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, An
             if "retry_for" in params:
                 kw["retry_for"] = int(params["retry_for"])
             return ln_pay(**kw)
+        if method == "ln_listinvoices":
+            return ln_listinvoices(params["node"], label=params.get("label") or None)
+        if method == "ln_waitinvoice":
+            return ln_waitinvoice(params["node"], str(params["label"]))
 
         return _error(f"Unknown method '{method}'")
 

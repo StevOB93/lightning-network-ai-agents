@@ -222,6 +222,11 @@ async function postJson(url, payload) {
     showLoginOverlay();
     throw new Error("Session expired — please log in again");
   }
+  if (res.status === 402) {
+    const data = await res.json();
+    showPaymentOverlay(data);
+    throw new Error("Payment required — pay the Lightning invoice to proceed");
+  }
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
@@ -264,6 +269,17 @@ function updateStatusBar(status) {
     indAgents.classList.toggle("online", online > 0);
   } else {
     indAgents.style.display = "none";
+  }
+
+  // x402 indicator
+  const indX402 = $("ind-x402");
+  if (indX402) {
+    if (status.x402_enabled) {
+      indX402.style.display = "";
+      indX402.classList.add("online");
+    } else {
+      indX402.style.display = "none";
+    }
   }
 }
 
@@ -1686,6 +1702,13 @@ async function restartSystem() {
 $("strategy-btn").addEventListener("click", cycleStrategy);
 $("ask-btn").addEventListener("click",     () => queueAsk().catch(e => setLog(e.message, true)));
 $("health-btn").addEventListener("click",  () => queueHealth().catch(e => setLog(e.message, true)));
+
+// x402 payment overlay controls
+if ($("x402-dismiss-btn")) $("x402-dismiss-btn").addEventListener("click", hidePaymentOverlay);
+if ($("x402-copy-btn")) $("x402-copy-btn").addEventListener("click", () => {
+  const bolt11 = $("x402-bolt11");
+  if (bolt11) { navigator.clipboard.writeText(bolt11.value).catch(() => {}); }
+});
 $("refresh-btn").addEventListener("click", () => refreshAll().catch(e => setLog(e.message, true)));
 $("network-refresh-btn").addEventListener("click", () => fetchNetwork().catch(() => {}));
 $("restart-btn").addEventListener("click",  () => restartSystem().catch(e => setLog(e.message, true)));
@@ -1964,6 +1987,27 @@ function hideLoginOverlay() {
   const shell = document.querySelector(".page-shell");
   if (overlay) overlay.style.display = "none";
   if (shell) shell.style.display = "";
+}
+
+// ---------------------------------------------------------------------------
+// x402 Payment overlay
+// ---------------------------------------------------------------------------
+
+/** Show the payment overlay with invoice details from a 402 response. */
+function showPaymentOverlay(data) {
+  const overlay = $("payment-overlay");
+  if (!overlay) return;
+  const amountMsat = data.amount_msat || 0;
+  const amountSat = Math.ceil(amountMsat / 1000);
+  $("x402-amount").textContent = `${amountSat.toLocaleString()} sats (${amountMsat.toLocaleString()} msat)`;
+  $("x402-memo").textContent = data.memo || "API access";
+  $("x402-bolt11").value = data.bolt11 || "";
+  overlay.style.display = "";
+}
+
+function hidePaymentOverlay() {
+  const overlay = $("payment-overlay");
+  if (overlay) overlay.style.display = "none";
 }
 
 /**

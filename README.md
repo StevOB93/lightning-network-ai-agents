@@ -100,7 +100,7 @@ graph TD
 | Safety | GuardedBackend (rate limiting, exponential backoff, circuit breaker) |
 | Security | Session auth, CSRF, rate limiting, RBAC, TLS, audit logging, secrets encryption |
 | Web UI | Vanilla HTML/CSS/JS, Server-Sent Events (SSE), D3.js network graph |
-| Testing | 487 tests — pytest on GitHub Actions CI |
+| Testing | 520 tests — pytest on GitHub Actions CI |
 
 ---
 

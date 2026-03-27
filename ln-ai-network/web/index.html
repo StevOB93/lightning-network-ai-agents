@@ -58,6 +58,27 @@
     </div>
   </div>
 
+  <!-- x402 Payment overlay — shown when an endpoint requires Lightning payment -->
+  <div id="payment-overlay" class="login-overlay" style="display:none">
+    <div class="login-card">
+      <div class="login-header">
+        <span class="bolt">&#9889;</span>
+        <h1>Payment Required</h1>
+      </div>
+      <p class="login-subtitle">This endpoint requires a Lightning micropayment.</p>
+      <div class="x402-details">
+        <div class="x402-row"><span class="x402-label">Amount:</span> <strong id="x402-amount"></strong></div>
+        <div class="x402-row"><span class="x402-label">Memo:</span> <span id="x402-memo"></span></div>
+        <div class="x402-invoice-box">
+          <label>BOLT11 Invoice</label>
+          <textarea id="x402-bolt11" readonly rows="3"></textarea>
+          <button type="button" id="x402-copy-btn" class="btn-sm" title="Copy invoice">Copy</button>
+        </div>
+      </div>
+      <button type="button" id="x402-dismiss-btn" class="btn-primary login-btn">Dismiss</button>
+    </div>
+  </div>
+
   <div class="page-shell">
 
     <!-- ── Status bar ── persistent across all tabs ── -->
@@ -96,6 +117,11 @@
           <span class="dot"></span>
           <span class="ind-label">Agents</span>
           <code class="ind-value" id="agents-val">—</code>
+        </div>
+        <!-- x402: shown when payment gateway is active -->
+        <div class="indicator" id="ind-x402" style="display:none">
+          <span class="dot"></span>
+          <span class="ind-label">x402</span>
         </div>
       </div>
       <!-- System controls — top-right corner of status bar -->

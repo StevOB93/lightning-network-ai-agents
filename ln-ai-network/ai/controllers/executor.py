@@ -12,6 +12,7 @@ from ai.controllers.shared import _env_int
 from ai.mcp_client import MCPClient, MCPTimeoutError
 from ai.models import ExecutionPlan, PlanStep, StepResult
 from ai.tools import _is_tool_error, _normalize_tool_args, _summarize_tool_result
+from scripts.x402 import extract_x402
 
 
 # =============================================================================
@@ -58,6 +59,11 @@ class ExecutorConfig:
     default_on_error: str = "abort"
     max_workers: int = 1
     retry_delay_s: float = 1.5
+    # x402 auto-pay: when True, the executor will automatically pay 402 invoices
+    # and retry the tool call with the payment preimage.
+    x402_auto_pay: bool = False
+    x402_pay_from_node: int = 1
+    x402_max_amount_msat: int = 100_000_000  # safety cap: 100k sats
 
     @staticmethod
     def from_env() -> ExecutorConfig:
@@ -70,6 +76,9 @@ class ExecutorConfig:
             default_on_error=os.getenv("EXECUTOR_DEFAULT_ON_ERROR", "abort"),
             max_workers=_env_int("EXECUTOR_MAX_WORKERS", 1),
             retry_delay_s=retry_delay,
+            x402_auto_pay=bool(os.getenv("EXECUTOR_X402_AUTO_PAY", "")),
+            x402_pay_from_node=_env_int("EXECUTOR_X402_PAY_NODE", 1),
+            x402_max_amount_msat=_env_int("EXECUTOR_X402_MAX_AMOUNT_MSAT", 100_000_000),
         )
 
 
@@ -587,6 +596,42 @@ class Executor:
                     "error": _exc_msg,
                 })
                 raw = {"error": _exc_msg}
+
+            # x402 auto-pay: if the tool returned a 402 payment-required
+            # response, pay the invoice and retry the tool call.
+            x402_info = extract_x402(raw)
+            if x402_info and self.config.x402_auto_pay:
+                amt = x402_info.get("amount_msat", 0)
+                if amt <= self.config.x402_max_amount_msat:
+                    self.trace.log({
+                        "event": "x402_payment",
+                        "stage": "executor",
+                        "req_id": req_id,
+                        "step_id": step.step_id,
+                        "tool": step.tool,
+                        "bolt11": x402_info["bolt11"][:30] + "...",
+                        "amount_msat": amt,
+                    })
+                    pay_result = self.mcp.call("ln_pay", args={
+                        "from_node": self.config.x402_pay_from_node,
+                        "bolt11": x402_info["bolt11"],
+                    })
+                    if not _is_tool_error(pay_result):
+                        # Payment succeeded — retry the tool call on the next
+                        # iteration (the 402 counts as a retryable event, not
+                        # a real tool error).
+                        self.trace.log({
+                            "event": "x402_paid",
+                            "stage": "executor",
+                            "req_id": req_id,
+                            "step_id": step.step_id,
+                            "amount_msat": amt,
+                        })
+                        continue  # retry the tool call
+                    else:
+                        # Payment failed — treat as a normal tool error
+                        raw = {"error": f"x402 payment failed: {_is_tool_error(pay_result)}"}
+
             tool_err = _is_tool_error(raw)
 
             self.trace.log({

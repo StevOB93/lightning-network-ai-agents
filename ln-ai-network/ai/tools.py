@@ -50,6 +50,8 @@ READ_ONLY_TOOLS = {
     "ln_listfunds",
     "ln_listchannels",
     "ln_newaddr",
+    "ln_listinvoices",
+    "ln_waitinvoice",
 }
 
 # Tools that change node/channel/wallet state.
@@ -117,6 +119,8 @@ TOOL_REQUIRED: Dict[str, List[str]] = {
     # Payments
     "ln_invoice": ["node", "amount_msat", "label", "description"],
     "ln_pay": ["from_node", "bolt11"],
+    "ln_listinvoices": ["node"],
+    "ln_waitinvoice": ["node", "label"],
 }
 
 # Fields that must be integers — LLMs sometimes emit them as strings ("1" instead of 1)
@@ -511,6 +515,8 @@ def llm_tools_schema() -> List[Dict[str, Any]]:
         # Payments
         {"type": "function", "function": {"name": "ln_invoice", "description": "Create invoice (returns payload.bolt11).", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}, "amount_msat": {"type": "integer"}, "label": {"type": "string"}, "description": {"type": "string"}}, "required": ["node", "amount_msat", "label", "description"]}}},
         {"type": "function", "function": {"name": "ln_pay", "description": "Pay BOLT11 invoice. Optional: maxfee (max fee in msat), retry_for (seconds to keep retrying).", "parameters": {"type": "object", "properties": {"from_node": {"type": "integer"}, "bolt11": {"type": "string"}, "maxfee": {"type": "integer", "description": "Maximum fee to pay in millisatoshis (optional)"}, "retry_for": {"type": "integer", "description": "Seconds to keep retrying payment (optional, default: CLN default)"}}, "required": ["from_node", "bolt11"]}}},
+        {"type": "function", "function": {"name": "ln_listinvoices", "description": "List invoices on a node. Optional: label (filter by specific label).", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}, "label": {"type": "string", "description": "Invoice label to filter by (optional)"}}, "required": ["node"]}}},
+        {"type": "function", "function": {"name": "ln_waitinvoice", "description": "Block until a specific invoice is paid. Returns payment details including preimage.", "parameters": {"type": "object", "properties": {"node": {"type": "integer"}, "label": {"type": "string"}}, "required": ["node", "label"]}}},
     ]
 
 
