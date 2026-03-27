@@ -18,7 +18,7 @@ from ai.controllers.planner import Planner, PlannerConfig
 from ai.controllers.translator import Translator, TranslatorConfig
 from ai.llm.base import LLMBackend, LLMRequest, LLMResponse
 from ai.mcp_client import MCPClient
-from ai.models import ExecutionPlan, IntentBlock, PipelineResult, PlanStep, StepResult
+from ai.models import PipelineResult
 
 
 # =============================================================================

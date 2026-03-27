@@ -216,7 +216,7 @@ def test_archive_multiple_outcomes(archive_path):
     h.write_entry("bad command", "Unknown intent", outcome="failed")
     h.write_entry("open channel", "Open channel node1→node2", outcome="partial")
 
-    records = [json.loads(l) for l in archive_path.read_text().strip().splitlines()]
+    records = [json.loads(line) for line in archive_path.read_text().strip().splitlines()]
     assert [r["outcome"] for r in records] == ["ok", "failed", "partial"]
 
 
@@ -228,7 +228,7 @@ def test_memory_lookup_filtering(archive_path):
     h.write_entry("run payment demo", "Open channel and pay invoice", outcome="failed", ts=3_000)
 
     # Read all entries (simulates memory_lookup internals)
-    entries = [json.loads(l) for l in archive_path.read_text().strip().splitlines()]
+    entries = [json.loads(line) for line in archive_path.read_text().strip().splitlines()]
 
     # Filter by keyword "payment"
     filtered = [e for e in entries if "payment" in e["user"].lower() or "payment" in e["goal"].lower()]

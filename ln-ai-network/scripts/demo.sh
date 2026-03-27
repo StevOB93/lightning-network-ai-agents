@@ -29,8 +29,19 @@ UI_HOST="${UI_HOST:-127.0.0.1}"
 UI_PORT="${UI_PORT:-8008}"
 UI_URL="http://${UI_HOST}:${UI_PORT}"
 POLL_INTERVAL=2        # seconds between completion checks
-POLL_TIMEOUT=120       # max seconds to wait for pipeline result
+POLL_TIMEOUT="${POLL_TIMEOUT:-120}"       # max seconds to wait for pipeline result
 READY_TIMEOUT=180      # max seconds to wait for system + UI readiness
+
+# Track background PIDs so the cleanup trap can kill them on interrupt
+_BG_PIDS=()
+_cleanup() {
+  if [[ ${#_BG_PIDS[@]} -gt 0 ]]; then
+    for pid in "${_BG_PIDS[@]}"; do
+      kill "$pid" 2>/dev/null || true
+    done
+  fi
+}
+trap _cleanup EXIT INT TERM
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -39,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --skip-setup)   SKIP_SETUP=true; shift ;;
     --prompt)       PROMPT="$2"; shift 2 ;;
     --nodes)        NODE_COUNT="$2"; shift 2 ;;
+    --timeout)      POLL_TIMEOUT="$2"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
 LN-AI Demo Script — one-command E2E demo
@@ -50,6 +62,7 @@ Options:
   --skip-setup       Skip system boot and network setup (use if stack is already running)
   --prompt "..."     Override the default payment prompt
   --nodes N          Number of Lightning nodes (default: 2)
+  --timeout SEC      Max seconds to wait for pipeline result (default: 120)
   -h, --help         Show this help
 
 Environment:
@@ -67,6 +80,11 @@ EOF
     *) echo "[ERROR] Unknown argument: $1"; exit 2 ;;
   esac
 done
+
+# Adapt default prompt if user didn't override and NODE_COUNT > 2
+if [[ "$PROMPT" == "Create an invoice for 100000 millisatoshis on node-2, then pay it from node-1." && "$NODE_COUNT" -gt 2 ]]; then
+  PROMPT="Create an invoice for 100000 millisatoshis on node-${NODE_COUNT}, then pay it from node-1."
+fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -179,12 +197,16 @@ fi
 ok "Prompt queued (message ID: $MSG_ID)"
 
 # Try to open the browser so the user can watch live
+_browser_opened=false
 if command -v xdg-open >/dev/null 2>&1; then
-  xdg-open "$UI_URL" >/dev/null 2>&1 &
+  xdg-open "$UI_URL" >/dev/null 2>&1 && _browser_opened=true
 elif command -v open >/dev/null 2>&1; then
-  open "$UI_URL" >/dev/null 2>&1 &
+  open "$UI_URL" >/dev/null 2>&1 && _browser_opened=true
 elif command -v wslview >/dev/null 2>&1; then
-  wslview "$UI_URL" >/dev/null 2>&1 &
+  wslview "$UI_URL" >/dev/null 2>&1 && _browser_opened=true
+fi
+if [[ "$_browser_opened" == "false" ]]; then
+  info "Open the Web UI manually: $UI_URL"
 fi
 
 # Poll for pipeline completion

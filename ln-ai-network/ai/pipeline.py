@@ -19,7 +19,7 @@ except ImportError:
     _fcntl = None  # type: ignore[assignment]  # Windows — skip locking gracefully
 
 # Internal modules
-from ai.command_queue import read_new, write_outbox
+from ai.command_queue import paths as queue_paths, read_new, write_outbox
 from ai.controllers.executor import Executor, ExecutorConfig, ExecutorError
 from ai.controllers.planner import Planner, PlannerConfig, PlannerError
 from ai.controllers.summarizer import Summarizer, SummarizerConfig
@@ -84,10 +84,18 @@ class PipelineCoordinator:
     def __init__(self) -> None:
         repo_root = _repo_root()
 
+        # Multi-agent support: when MULTI_AGENT=1, each pipeline gets its own
+        # runtime directory under runtime/agent-{N}/ (keyed by NODE_NUMBER).
+        # In single-agent mode (default), agent_id is None → runtime/agent/.
+        self._node = _env_int("NODE_NUMBER", 1)
+        self._multi_agent = _env_bool("MULTI_AGENT", default=False)
+        self._agent_id: Optional[str] = str(self._node) if self._multi_agent else None
+
         # Acquire the single-instance lock before doing any real work.
         # If another pipeline is running this will print an error and exit(1).
-        lock_path = repo_root / "runtime" / "agent" / "pipeline.lock"
-        self._lock = StartupLock(lock_path, name="pipeline")
+        agent_dir = _runtime_agent_dir(self._agent_id)
+        lock_path = agent_dir / "pipeline.lock"
+        self._lock = StartupLock(lock_path, name=f"pipeline-{self._node}" if self._multi_agent else "pipeline")
         self._lock.acquire_or_exit()
 
         # Centralised configuration — all env vars read once at startup
@@ -107,7 +115,7 @@ class PipelineCoordinator:
         summarizer_backend = GuardedBackend(create_backend_for_role("summarizer"),  self._cfg)
 
         # Shared trace logger — all four stages write to the same trace.log file
-        self.trace = TraceLogger(_runtime_agent_dir() / "trace.log")
+        self.trace = TraceLogger(agent_dir / "trace.log")
 
         # Instantiate each stage controller, injecting shared dependencies
         self.translator = Translator(TranslatorConfig.from_env(), translator_backend, self.trace)
@@ -128,20 +136,19 @@ class PipelineCoordinator:
         # messages to it, and clean up stale entries from previous runs.
         self._registry = AgentRegistry(_repo_root() / "runtime" / "registry.jsonl")
         self._registry.purge_stale()
-        self._node = _env_int("NODE_NUMBER", 1)
         self._registry.register(
             "pipeline", node=self._node,
-            inbox_path=_runtime_agent_dir() / "inbox.jsonl",
+            inbox_path=agent_dir / "inbox.jsonl",
         )
 
         # Persistent conversation history file — survives process restarts.
         # Each line is a JSON {"role": ..., "content": ...} message.
-        self._history_path = _runtime_agent_dir() / "history.jsonl"
+        self._history_path = agent_dir / "history.jsonl"
 
         # Tier-3 episodic archive — append-only record of every completed run.
         # Never trimmed automatically; only wiped on `restart_agent.sh fresh`.
         # NOT injected into LLM context — only queried on demand via memory_lookup.
-        self._archive_path = _runtime_agent_dir() / "archive.jsonl"
+        self._archive_path = agent_dir / "archive.jsonl"
 
         # Rolling conversation history: list of {"role": "user"|"assistant", "content": str}
         # Injected into the Translator's messages so follow-up queries have context.
@@ -256,7 +263,7 @@ class PipelineCoordinator:
 
     def _write_report(self, result: PipelineResult) -> None:
         """Serialize and append the pipeline result to the outbox JSONL file."""
-        write_outbox(result.to_outbox_dict())
+        write_outbox(result.to_outbox_dict(), agent_id=self._agent_id)
 
     def _update_history(
         self,
@@ -412,6 +419,134 @@ class PipelineCoordinator:
             return None
 
     # -------------------------------------------------------------------------
+    # Inter-agent routing
+    # -------------------------------------------------------------------------
+
+    def _handle_route_intent(
+        self,
+        intent: IntentBlock,
+        req_id: int,
+        ts: int,
+        t_translate: float,
+    ) -> PipelineResult:
+        """
+        Delegate a sub-task to another node's pipeline and wait for the reply.
+
+        The Translator sets intent_type="route" when the query targets a node
+        that this agent doesn't own. We forward the routed_prompt to the
+        target agent's inbox (via the registry) with a reply_id, then poll
+        our own inbox for the reply message.
+
+        Returns a PipelineResult whose human_summary includes the remote
+        agent's response.
+        """
+        import secrets
+        target_node = int(intent.context.get("target_node", 0))
+        routed_prompt = str(intent.context.get("routed_prompt", intent.raw_prompt))
+
+        if target_node < 1:
+            return PipelineResult(
+                request_id=req_id, ts=ts, success=False,
+                stage_failed="router", intent=intent, plan=None,
+                step_results=[], human_summary="Route failed: no valid target_node in intent context.",
+                error="missing target_node", pipeline_build=PIPELINE_BUILD,
+            )
+
+        reply_id = f"route-{req_id}-{secrets.token_hex(4)}"
+        my_inbox = queue_paths(self._agent_id).inbox
+
+        self.trace.log({
+            "event": "route_send",
+            "req_id": req_id,
+            "target_node": target_node,
+            "reply_id": reply_id,
+            "routed_prompt": routed_prompt[:200],
+        })
+
+        # Build the message that will land in the target agent's inbox.
+        # It looks like a normal freeform prompt but carries reply routing info.
+        routed_msg = {
+            "id": req_id,
+            "ts": int(time.time()),
+            "role": "user",
+            "content": routed_prompt,
+            "meta": {"kind": "freeform", "use_llm": True},
+            "reply_id": reply_id,
+            "reply_inbox": str(my_inbox),
+            "routed_from_node": self._node,
+        }
+        ok = self._registry.route_to("pipeline", target_node, routed_msg)
+        if not ok:
+            return PipelineResult(
+                request_id=req_id, ts=ts, success=False,
+                stage_failed="router", intent=intent, plan=None,
+                step_results=[],
+                human_summary=f"Route failed: no live pipeline for node {target_node} in registry.",
+                error=f"no live pipeline:{target_node}", pipeline_build=PIPELINE_BUILD,
+            )
+
+        # Wait for the remote agent to process and reply
+        timeout = float(os.getenv("ROUTE_REPLY_TIMEOUT_S", "30"))
+        reply = self._registry.await_reply(reply_id, my_inbox, timeout_s=timeout)
+
+        self.trace.log({
+            "event": "route_reply",
+            "req_id": req_id,
+            "reply_id": reply_id,
+            "received": reply is not None,
+        })
+
+        if reply is None:
+            return PipelineResult(
+                request_id=req_id, ts=ts, success=False,
+                stage_failed="router", intent=intent, plan=None,
+                step_results=[],
+                human_summary=f"Route timed out: agent {target_node} did not reply within {timeout}s.",
+                error="route_timeout", pipeline_build=PIPELINE_BUILD,
+            )
+
+        # Extract the remote agent's summary from its reply
+        remote_summary = reply.get("content", reply.get("human_summary", str(reply)))
+        summary = f"[Routed to agent {target_node}] {remote_summary}"
+
+        self.trace.log({
+            "event": "stage_timing", "req_id": req_id,
+            "translator_ms": round(t_translate, 1),
+            "route_target": target_node,
+        })
+
+        return PipelineResult(
+            request_id=req_id, ts=ts, success=True,
+            stage_failed=None, intent=intent, plan=None,
+            step_results=[], human_summary=summary,
+            error=None, pipeline_build=PIPELINE_BUILD,
+        )
+
+    def _send_route_reply(
+        self, reply_id: str, reply_inbox: str, result: PipelineResult,
+    ) -> None:
+        """Write a reply message to the sender's inbox for await_reply() to pick up."""
+        from pathlib import Path as _Path
+        reply = {
+            "in_reply_to": reply_id,
+            "ts": int(time.time()),
+            "from_node": self._node,
+            "success": result.success,
+            "content": result.human_summary,
+            "human_summary": result.human_summary,
+        }
+        try:
+            inbox = _Path(reply_inbox)
+            inbox.parent.mkdir(parents=True, exist_ok=True)
+            with inbox.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(reply, ensure_ascii=False) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self.trace.log({"event": "route_reply_sent", "reply_id": reply_id})
+        except Exception as exc:
+            self.trace.log({"event": "route_reply_failed", "reply_id": reply_id, "error": str(exc)})
+
+    # -------------------------------------------------------------------------
     # Pipeline execution
     # -------------------------------------------------------------------------
 
@@ -473,6 +608,10 @@ class PipelineCoordinator:
                 error=None, pipeline_build=PIPELINE_BUILD,
             )
 
+        # Short-circuit: route intent delegates to another agent
+        if intent.intent_type == "route":
+            return self._handle_route_intent(intent, req_id, ts, t_translate)
+
         # Stage 2: Plan — IntentBlock → ordered ExecutionPlan of MCP tool calls
         _t0 = time.monotonic()
         try:
@@ -530,7 +669,7 @@ class PipelineCoordinator:
         # finally block so the SSE client always sees the end marker.
         _t0 = time.monotonic()
         if all_ok and step_results:
-            stream_path = _runtime_agent_dir() / "stream.jsonl"
+            stream_path = _runtime_agent_dir(self._agent_id) / "stream.jsonl"
 
             # Overwrite (not append) to clear any previous query's tokens.
             # The SSE client seeks to end-of-file on connect, but clearing here
@@ -667,7 +806,7 @@ class PipelineCoordinator:
                 if self._reload_pending:
                     self._reload_config()
 
-                for msg in read_new():
+                for msg in read_new(agent_id=self._agent_id):
                     try:
                         req_id = int(msg.get("id", 0))
                     except (ValueError, TypeError):
@@ -716,6 +855,14 @@ class PipelineCoordinator:
                                 human_summary=result.human_summary,
                             )
 
+                        # If this was a routed request from another agent, write
+                        # the result back to the sender's inbox so it can be
+                        # picked up by await_reply().
+                        reply_id = msg.get("reply_id")
+                        reply_inbox = msg.get("reply_inbox")
+                        if reply_id and reply_inbox:
+                            self._send_route_reply(reply_id, reply_inbox, result)
+
                     elif kind == "route":
                         # Inter-agent routing: forward the payload to another
                         # registered pipeline or agent process.
@@ -739,7 +886,7 @@ class PipelineCoordinator:
                                 f"No live {target_kind}:{target_node} found in registry."
                             ),
                             "pipeline_build": PIPELINE_BUILD,
-                        })
+                        }, agent_id=self._agent_id)
 
                     elif kind == "list_peers":
                         # Discovery: return all currently-running registered processes.
@@ -752,7 +899,7 @@ class PipelineCoordinator:
                             "content": f"{len(peers)} peer(s) registered.",
                             "peers": peers,
                             "pipeline_build": PIPELINE_BUILD,
-                        })
+                        }, agent_id=self._agent_id)
 
                     elif kind == "health_check":
                         # Lightweight ping — no LLM involved, just confirm we're alive
@@ -763,7 +910,7 @@ class PipelineCoordinator:
                             "success": True,
                             "content": "Pipeline is running.",
                             "pipeline_build": PIPELINE_BUILD,
-                        })
+                        }, agent_id=self._agent_id)
                     else:
                         write_outbox({
                             "ts": int(time.time()),
@@ -772,7 +919,7 @@ class PipelineCoordinator:
                             "success": False,
                             "content": f"Unknown/unsupported command kind: {kind}",
                             "pipeline_build": PIPELINE_BUILD,
-                        })
+                        }, agent_id=self._agent_id)
 
             except KeyboardInterrupt:
                 self._log("pipeline_stop", {"msg": "Shutdown requested."})

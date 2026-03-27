@@ -30,7 +30,6 @@ Gemini test coverage:
 """
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -40,11 +39,9 @@ import pytest
 from ai.llm.base import (
     AuthError,
     LLMRequest,
-    LLMResponse,
     LLMUsage,
     PermanentAPIError,
     RateLimitError,
-    ToolCall,
     TransientAPIError,
 )
 
@@ -514,7 +511,6 @@ class TestOllamaBackend:
 
     def test_text_fallback_json_object_form(self):
         """Content with JSON {"tool": ..., "args": {...}} is parsed as tool call."""
-        from ai.llm.adapters.ollama_backend import OllamaBackend
         backend = self._make_backend()
         body = {
             "message": {

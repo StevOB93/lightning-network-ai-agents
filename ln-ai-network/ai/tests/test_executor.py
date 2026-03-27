@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 from ai.controllers.executor import Executor, ExecutorConfig, ExecutorError
-from ai.models import ExecutionPlan, IntentBlock, PlanStep, StepResult
+from ai.models import ExecutionPlan, IntentBlock, PlanStep
 
 
 # =============================================================================

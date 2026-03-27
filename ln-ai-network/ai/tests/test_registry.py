@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 
@@ -144,7 +143,7 @@ def test_purge_stale_removes_dead_entries(reg, tmp_path):
     removed = reg.purge_stale()
     assert removed == 1
 
-    remaining = [json.loads(l) for l in reg.path.read_text().splitlines() if l.strip()]
+    remaining = [json.loads(line) for line in reg.path.read_text().splitlines() if line.strip()]
     pids = [r["pid"] for r in remaining]
     assert os.getpid() in pids
     assert DEAD_PID not in pids

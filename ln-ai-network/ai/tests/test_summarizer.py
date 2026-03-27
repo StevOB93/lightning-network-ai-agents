@@ -14,10 +14,8 @@ Test groups:
 """
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List
 
-import pytest
 
 from ai.llm.base import LLMBackend, LLMError, LLMRequest, LLMResponse
 from ai.controllers.summarizer import Summarizer, SummarizerConfig

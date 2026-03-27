@@ -131,10 +131,14 @@ def _repair_json(text: str) -> str:
     def _eval_arith(m: re.Match) -> str:
         try:
             a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
-            if op == '*':   return str(a * b)
-            if op == '+':   return str(a + b)
-            if op == '-':   return str(a - b)
-            if op == '/' and b != 0: return str(round(a / b))
+            if op == '*':
+                return str(a * b)
+            if op == '+':
+                return str(a + b)
+            if op == '-':
+                return str(a - b)
+            if op == '/' and b != 0:
+                return str(round(a / b))
         except Exception:
             pass
         return m.group(0)

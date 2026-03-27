@@ -34,7 +34,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 try:
     import fcntl  # Linux/WSL file locking
@@ -57,10 +57,19 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def paths() -> QueuePaths:
-    """Return all queue file paths relative to the repo root."""
+def paths(agent_id: Optional[str] = None) -> QueuePaths:
+    """Return all queue file paths relative to the repo root.
+
+    When agent_id is None (default), uses ``runtime/agent/`` for backward
+    compatibility with single-agent mode.  When agent_id is set (e.g. "2"),
+    uses ``runtime/agent-{agent_id}/`` so each pipeline instance has its
+    own inbox, outbox, offset, and counter files.
+    """
     root = _repo_root()
-    base = root / "runtime" / "agent"
+    if agent_id:
+        base = root / "runtime" / f"agent-{agent_id}"
+    else:
+        base = root / "runtime" / "agent"
     return QueuePaths(
         base_dir=base,
         inbox=base / "inbox.jsonl",
@@ -88,14 +97,14 @@ def _unlock(f) -> None:
 
 # ── Queue initialization ─────────────────────────────────────────────────────
 
-def ensure() -> QueuePaths:
+def ensure(agent_id: Optional[str] = None) -> QueuePaths:
     """
     Create the queue directory and all queue files if they don't exist.
 
     Called at the start of every read/write operation so callers never
     need to pre-initialize — the queue self-bootstraps on first use.
     """
-    qp = paths()
+    qp = paths(agent_id)
     qp.base_dir.mkdir(parents=True, exist_ok=True)
     qp.inbox.touch(exist_ok=True)
     qp.outbox.touch(exist_ok=True)
@@ -108,7 +117,7 @@ def ensure() -> QueuePaths:
 
 # ── Message ID counter ───────────────────────────────────────────────────────
 
-def _next_id() -> int:
+def _next_id(agent_id: Optional[str] = None) -> int:
     """
     Atomically increment and return the next message ID.
 
@@ -116,7 +125,7 @@ def _next_id() -> int:
     even when the UI and agent run concurrently. The counter file always contains
     a single integer (the last assigned ID).
     """
-    qp = ensure()
+    qp = ensure(agent_id)
     with qp.counter.open("r+", encoding="utf-8") as f:
         _lock(f)
         try:
@@ -142,7 +151,7 @@ def _next_id() -> int:
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def enqueue(content: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def enqueue(content: str, meta: Optional[Dict[str, Any]] = None, agent_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Write a new message to inbox.jsonl.
 
@@ -155,9 +164,9 @@ def enqueue(content: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
     Returns the full message dict so the caller can log the assigned ID.
     """
-    qp = ensure()
+    qp = ensure(agent_id)
     msg = {
-        "id": _next_id(),
+        "id": _next_id(agent_id),
         "ts": int(time.time()),
         "role": "user",
         "content": content,
@@ -177,7 +186,7 @@ def enqueue(content: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, An
     return msg
 
 
-def read_new() -> List[Dict[str, Any]]:
+def read_new(agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Read and return all inbox messages that have arrived since the last call.
 
@@ -193,7 +202,7 @@ def read_new() -> List[Dict[str, Any]]:
     Malformed lines are silently skipped so a single bad entry doesn't block
     all subsequent messages.
     """
-    qp = ensure()
+    qp = ensure(agent_id)
     try:
         offset = int(qp.offset.read_text(encoding="utf-8").strip() or "0")
     except Exception:
@@ -239,7 +248,7 @@ def read_new() -> List[Dict[str, Any]]:
     return msgs
 
 
-def write_outbox(entry: Dict[str, Any]) -> None:
+def write_outbox(entry: Dict[str, Any], agent_id: Optional[str] = None) -> None:
     """
     Append a response entry to outbox.jsonl.
 
@@ -248,7 +257,7 @@ def write_outbox(entry: Dict[str, Any]) -> None:
 
     Uses LOCK_EX + fsync for the same durability guarantees as enqueue().
     """
-    qp = ensure()
+    qp = ensure(agent_id)
     line = json.dumps(entry, ensure_ascii=False) + "\n"
     with qp.outbox.open("a", encoding="utf-8") as f:
         _lock(f)
@@ -260,7 +269,7 @@ def write_outbox(entry: Dict[str, Any]) -> None:
             _unlock(f)
 
 
-def last_outbox() -> Optional[Dict[str, Any]]:
+def last_outbox(agent_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Return the most recent valid entry from outbox.jsonl without loading the
     entire file.
@@ -271,7 +280,7 @@ def last_outbox() -> Optional[Dict[str, Any]]:
 
     Returns None if the outbox is empty or all trailing lines are malformed.
     """
-    qp = ensure()
+    qp = ensure(agent_id)
     with qp.outbox.open("rb") as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()

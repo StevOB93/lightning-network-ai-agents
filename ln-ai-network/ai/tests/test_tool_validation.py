@@ -1,6 +1,5 @@
 """Tests for additional tool argument validation in _normalize_tool_args."""
 from __future__ import annotations
-import pytest
 from ai.tools import _normalize_tool_args
 
 def test_amount_msat_zero_rejected():

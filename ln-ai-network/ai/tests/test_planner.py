@@ -25,7 +25,7 @@ import pytest
 
 from ai.llm.base import LLMBackend, LLMRequest, LLMResponse, TransientAPIError
 from ai.controllers.planner import Planner, PlannerConfig, PlannerError
-from ai.models import ExecutionPlan, IntentBlock, PlanStep
+from ai.models import ExecutionPlan, IntentBlock
 
 
 # =============================================================================

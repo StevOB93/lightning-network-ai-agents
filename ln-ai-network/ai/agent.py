@@ -21,11 +21,10 @@ from __future__ import annotations
 # =============================================================================
 
 import json
-import os
 import signal
 import time
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ai.command_queue import read_new, write_outbox
 from ai.controllers.conversation import ConversationConfig, ConversationController

@@ -264,8 +264,15 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _runtime_agent_dir() -> Path:
-    """Path to runtime/agent/ where trace.log, inbox.jsonl, etc. live."""
+def _runtime_agent_dir(agent_id: Optional[str] = None) -> Path:
+    """Path to the agent's runtime directory.
+
+    When agent_id is None (default), returns ``runtime/agent/`` for backward
+    compatibility with single-agent mode.  When agent_id is set (e.g. "2"),
+    returns ``runtime/agent-{agent_id}/`` for multi-agent mode.
+    """
+    if agent_id:
+        return _repo_root() / "runtime" / f"agent-{agent_id}"
     return _repo_root() / "runtime" / "agent"
 
 

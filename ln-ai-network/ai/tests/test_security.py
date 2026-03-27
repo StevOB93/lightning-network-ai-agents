@@ -9,9 +9,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 # Ensure the repo root is on sys.path so we can import scripts.security
 REPO_ROOT = Path(__file__).resolve().parents[2]

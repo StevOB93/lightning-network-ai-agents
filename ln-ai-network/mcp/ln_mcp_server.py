@@ -167,14 +167,35 @@ def _ln_base(cfg: RuntimeConfig, node_dir: Path) -> List[str]:
     return ["lightning-cli", f"--network={cfg.network}", f"--lightning-dir={str(node_dir)}"]
 
 
+def _btc_rpc_conf(cfg: RuntimeConfig) -> Path:
+    """Return (and lazily create) a temporary RPC auth conf file.
+
+    The password is written to a file with mode 600 rather than passed on
+    the command line, where it would be visible in ``/proc/<pid>/cmdline``
+    to any user on the system. The conf file is placed under the runtime
+    directory (gitignored) and reused across calls for the lifetime of
+    this process.
+    """
+    conf = cfg.runtime_dir / "rpc_auth.conf"
+    if not conf.exists():
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        conf.write_text(
+            f"rpcuser={cfg.bitcoin_rpc_user}\n"
+            f"rpcpassword={cfg.bitcoin_rpc_password}\n",
+            encoding="utf-8",
+        )
+        os.chmod(str(conf), 0o600)
+    return conf
+
+
 def _btc_base(cfg: RuntimeConfig, wallet: Optional[str] = None) -> List[str]:
+    conf = _btc_rpc_conf(cfg)
     argv = [
         "bitcoin-cli",
         f"-{cfg.network}",
         f"-datadir={str(cfg.bitcoin_dir)}",
         f"-rpcport={cfg.bitcoin_rpc_port}",
-        f"-rpcuser={cfg.bitcoin_rpc_user}",
-        f"-rpcpassword={cfg.bitcoin_rpc_password}",
+        f"-conf={str(conf)}",
     ]
     # Backward compatible: only add -rpcwallet when provided (or defaulted).
     if wallet:

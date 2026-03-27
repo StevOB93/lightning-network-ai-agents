@@ -26,7 +26,7 @@ from __future__ import annotations
 #   modification during plan execution without the overhead of full copies.
 # =============================================================================
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 

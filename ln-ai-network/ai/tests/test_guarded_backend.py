@@ -12,7 +12,6 @@ Strategy:
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,7 +24,6 @@ from ai.llm.base import (
     LLMUsage,
     PermanentAPIError,
     RateLimitError,
-    ToolCall,
     TransientAPIError,
 )
 from ai.llm.guarded_backend import GuardedBackend

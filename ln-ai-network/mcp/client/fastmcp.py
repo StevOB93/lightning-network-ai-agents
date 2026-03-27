@@ -4,7 +4,7 @@ import atexit
 import json
 import subprocess
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 class FastMCPClient:

@@ -33,9 +33,9 @@ import pytest
 from ai.controllers.executor import Executor, ExecutorConfig
 from ai.controllers.planner import Planner, PlannerConfig, PlannerError
 from ai.controllers.summarizer import Summarizer, SummarizerConfig
-from ai.controllers.translator import Translator, TranslatorConfig, TranslatorError
+from ai.controllers.translator import Translator, TranslatorConfig
 from ai.llm.base import LLMBackend, LLMError, LLMRequest, LLMResponse, LLMUsage, ToolCall
-from ai.models import ExecutionPlan, IntentBlock, PipelineResult, PlanStep
+from ai.models import ExecutionPlan, IntentBlock, PlanStep
 
 
 # =============================================================================

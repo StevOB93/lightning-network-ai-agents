@@ -1,0 +1,17 @@
+# Ruff linter configuration for ln-ai-network
+target-version = "py310"
+line-length = 120
+
+[lint]
+# Start with a minimal rule set — catch real bugs without style noise
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused imports, undefined names)
+    "W",    # pycodestyle warnings
+]
+ignore = [
+    "E501",  # line too long — enforced at 120 but many existing lines exceed it
+    "E402",  # module-level import not at top — we use sys.path manipulation in tests
+    "F841",  # local variable assigned but never used — some intentional in tests
+    "W605",  # invalid escape sequence — flagged in docstrings where it's harmless
+]

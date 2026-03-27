@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +39,7 @@ class TranslatorError(Exception):
 _VALID_INTENT_TYPES = {
     "open_channel", "set_fee", "rebalance", "pay_invoice", "noop", "freeform",
     "recall",  # user is asking about past operations / run history
+    "route",   # delegate a sub-task to a different node's agent
 }
 
 
@@ -79,13 +79,15 @@ _SYSTEM_PROMPT_TMPL = """\
 You are a Lightning Network intent parser running in regtest.
 Available nodes: 1 through {node_count}.
 
+You are agent {self_node} (of {node_count}).
+
 Given a user's natural language request, extract their intent and return it as a
 single JSON object. Output ONLY the JSON — no markdown fences, no explanation text.
 
 The JSON must have exactly these fields:
 {{
   "goal": "<one machine-readable sentence describing what the user wants>",
-  "intent_type": "<one of: open_channel | set_fee | rebalance | pay_invoice | recall | noop | freeform>",
+  "intent_type": "<one of: open_channel | set_fee | rebalance | pay_invoice | recall | route | noop | freeform>",
   "context": {{
     "<entity_name>": <value>
   }},
@@ -101,6 +103,11 @@ Intent type guide:
 - pay_invoice: user wants to pay a BOLT11 invoice or send a specific payment
 - recall: user is asking about past operations or run history ("what did I run last time?",
   "did the payment succeed?", "show recent history", "what happened before?", "last run")
+- route: the user is asking about a DIFFERENT node's state or wants an action performed
+  BY a different node (e.g. "what is node 2's balance?" when you are agent 1). Set
+  context.target_node to the node that should handle the request, and context.routed_prompt
+  to the sub-task description for that node's agent. Only use this when the request
+  clearly targets a node other than yours ({self_node}).
 - noop: greeting, unclear request, meta-question about the agent, or anything with no actionable intent
 - freeform: any other actionable request including balance checks, diagnostic tests, status queries, node info, mining, or anything that needs tool calls
 
@@ -162,7 +169,10 @@ class Translator:
         Retries up to config.max_retries on JSON parse failure.
         Raises TranslatorError if all attempts fail.
         """
-        system_prompt = _SYSTEM_PROMPT_TMPL.format(node_count=_get_node_count())
+        system_prompt = _SYSTEM_PROMPT_TMPL.format(
+            node_count=_get_node_count(),
+            self_node=os.getenv("NODE_NUMBER", "1"),
+        )
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
         # Inject prior conversation turns for context continuity

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from openai import OpenAI
 from ai.llm.base import (
