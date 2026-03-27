@@ -91,6 +91,12 @@
           <span class="ind-label">Messages</span>
           <code class="ind-value" id="msg-count">—</code>
         </div>
+        <!-- Multi-agent: shows running agent count (hidden in single-agent mode) -->
+        <div class="indicator" id="ind-agents" style="display:none">
+          <span class="dot"></span>
+          <span class="ind-label">Agents</span>
+          <code class="ind-value" id="agents-val">—</code>
+        </div>
       </div>
       <!-- System controls — top-right corner of status bar -->
       <div class="status-bar-actions">
@@ -243,6 +249,12 @@
         <!-- SVG is injected here by initNetworkGraph() / renderNetwork() -->
         <div id="network-viz" class="network-viz">
           <div class="empty-state">Run a health check or node query to populate the graph.</div>
+        </div>
+        <div class="network-legend">
+          <span class="legend-item"><span class="legend-dot" style="background:var(--accent-2)"></span> Running</span>
+          <span class="legend-item"><span class="legend-dot" style="background:var(--danger)"></span> Stopped</span>
+          <span class="legend-item"><span class="legend-line active"></span> Active channel</span>
+          <span class="legend-item"><span class="legend-line inactive"></span> Inactive channel</span>
         </div>
       </section>
 

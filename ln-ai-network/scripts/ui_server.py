@@ -539,12 +539,28 @@ def _runtime_snapshot() -> dict[str, Any]:
     if lock_path.exists():
         lock_text = lock_path.read_text(encoding="utf-8", errors="ignore").strip()
 
+    # Multi-agent awareness: report node count and running agents
+    node_count = _read_node_count()
+    multi_agent = bool(os.getenv("MULTI_AGENT", ""))
+    agents: list[dict[str, Any]] = []
+    if multi_agent and node_count > 0:
+        for n in range(1, node_count + 1):
+            agent_dir = REPO_ROOT / "runtime" / f"agent-{n}"
+            agent_lock = agent_dir / "pipeline.lock"
+            agents.append({
+                "node": n,
+                "online": agent_lock.exists(),
+            })
+
     return {
         "agent_lock": lock_text,        # "pid=1234 started_ts=1710871234" or ""
         "last_outbox": last_outbox(),   # Most recent outbox entry (any type)
         "recent_inbox": inbox,          # Last 10 inbox entries
         "recent_outbox": outbox,        # Last 10 outbox entries
         "message_count": len(inbox),    # Count of recent inbox entries shown
+        "node_count": node_count,       # Number of Lightning nodes configured
+        "multi_agent": multi_agent,     # True when MULTI_AGENT=1
+        "agents": agents,              # Per-agent online status (multi-agent only)
     }
 
 

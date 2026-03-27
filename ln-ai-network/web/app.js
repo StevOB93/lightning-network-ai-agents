@@ -28,6 +28,8 @@ const pipelineBuild  = $("pipeline-build"); // Pipeline build string from outbox
 const indAgent       = $("ind-agent");      // Online/offline indicator dot
 const indSSE         = $("ind-sse");        // SSE connection indicator dot
 const sseStatusVal   = $("sse-status-val"); // SSE status text
+const indAgents      = $("ind-agents");     // Multi-agent indicator (hidden in single mode)
+const agentsVal      = $("agents-val");     // Agent count value
 
 // Pipeline stage display panels
 const intentDisplay  = $("intent-display"); // Rendered IntentBlock
@@ -252,6 +254,17 @@ function updateStatusBar(status) {
   if (last?.pipeline_build) {
     pipelineBuild.textContent = last.pipeline_build;
   }
+
+  // Multi-agent: show running/total agent count
+  if (status.multi_agent && status.agents?.length) {
+    indAgents.style.display = "";
+    const online = status.agents.filter(a => a.online).length;
+    const total = status.agents.length;
+    agentsVal.textContent = `${online}/${total}`;
+    indAgents.classList.toggle("online", online > 0);
+  } else {
+    indAgents.style.display = "none";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,12 +452,14 @@ function renderPipelineResult(result) {
   // Summary card: shown whenever there's any answer text available
   if (result.content || result.human_summary || result.error) {
     summaryCard.style.display = "";
-    summaryBody.textContent = result.content || result.human_summary || result.error || "";
+    const summaryText = result.content || result.human_summary || result.error || "";
+    summaryBody.textContent = summaryText;
     summaryTs.textContent = fmtDateTime(result.ts);
-    // success=false OR error present → show ✗; otherwise ✓
+    // success=false OR error present → show ✗; routed → show ↗; otherwise ✓
     const ok = result.success !== false && !result.error;
-    summaryIcon.textContent = ok ? "✓" : "✗";
-    summaryIcon.className = "summary-icon " + (ok ? "ok" : "fail");
+    const routed = summaryText.startsWith("[Routed to") || result.stage_failed === "router";
+    summaryIcon.textContent = routed ? "↗" : ok ? "✓" : "✗";
+    summaryIcon.className = "summary-icon " + (routed && ok ? "ok" : ok ? "ok" : "fail");
   }
 }
 
@@ -491,8 +506,14 @@ function renderTrace(events) {
     appended = true;
 
     const row = document.createElement("div");
-    row.className = "trace-row";
     const kind = ev.kind || ev.event || ev.stage || "event";
+    // Color-code trace rows by event category
+    const kl = kind.toLowerCase();
+    let rowVariant = "";
+    if (kl.includes("route"))               rowVariant = "trace-route";
+    else if (kl.includes("fail") || kl.includes("error")) rowVariant = "trace-error";
+    else if (kl === "goal_verify")           rowVariant = "trace-success";
+    row.className = "trace-row" + (rowVariant ? " " + rowVariant : "");
     const ts = fmtTs(ev.ts);
     // Build the detail string: strip known display fields, serialize the rest
     const detail = (() => {
@@ -857,19 +878,22 @@ function renderNetwork(data) {
 
   node.append("circle")
     .attr("r", GRAPH_NODE_RADIUS)
-    .attr("fill", "var(--accent-dim)")
-    .attr("stroke", "var(--accent)")
+    .attr("fill", d => d.raw?.running === false ? "rgba(239,68,68,0.12)" : "var(--accent-dim)")
+    .attr("stroke", d => d.raw?.running === false ? "var(--danger)" : "var(--accent-2)")
     .attr("stroke-width", 2);
 
-  // Show first 6 chars of the label inside the circle (enough to identify the node)
+  // Show alias or first 6 chars of the label inside the circle
   node.append("text")
     .attr("text-anchor", "middle").attr("dy", "0.35em")
     .attr("font-size", 10).attr("font-weight", "700")
     .attr("fill", "var(--ink)").attr("font-family", "IBM Plex Mono, monospace")
     .text(d => d.label.slice(0, 6));
 
-  // Full node ID as a native browser tooltip (shown on hover)
-  node.append("title").text(d => d.id);
+  // Tooltip: show full node ID + running status
+  node.append("title").text(d => {
+    const status = d.raw?.running === false ? " (stopped)" : d.raw?.running ? " (running)" : "";
+    return d.id + status;
+  });
 
   // Force simulation — four forces work together to produce a readable layout:
   //   link:    pulls connected nodes toward each other (distance=120px)
@@ -892,7 +916,11 @@ function renderNetwork(data) {
       node.attr("transform", d => `translate(${d.x},${d.y})`);
     });
 
-  networkHint.textContent = `${nodes.length} node${nodes.length !== 1 ? "s" : ""}, ${links.length} channel${links.length !== 1 ? "s" : ""}`;
+  const runningCount = nodes.filter(n => n.raw?.running !== false).length;
+  const stoppedCount = nodes.length - runningCount;
+  let hint = `${nodes.length} node${nodes.length !== 1 ? "s" : ""}, ${links.length} channel${links.length !== 1 ? "s" : ""}`;
+  if (stoppedCount > 0) hint += ` (${stoppedCount} stopped)`;
+  networkHint.textContent = hint;
 }
 
 // ---------------------------------------------------------------------------
@@ -1780,6 +1808,8 @@ function startSSE() {
       if (!archivePanel.hasAttribute("hidden")) fetchAndRenderArchiveList().catch(() => {});
       // Always refresh metrics when a new pipeline result arrives
       fetchAndRenderMetrics().catch(() => {});
+      // Auto-refresh the network graph after pipeline completion (state may have changed)
+      fetchNetwork().catch(() => {});
     } catch (_) {}
   });
 

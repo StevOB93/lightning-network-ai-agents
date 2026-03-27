@@ -18,7 +18,8 @@ The system is organized as a **five-layer stack** with a **four-stage AI pipelin
 ```mermaid
 graph TD
     subgraph "User Interface"
-        UI[Web Dashboard<br/>HTML · JS · SSE]
+        UI[Web Dashboard<br/>HTML · JS · SSE · D3]
+        SEC[Auth · CSRF · Rate Limit<br/>TLS · RBAC · Audit]
     end
 
     subgraph "AI Pipeline"
@@ -29,14 +30,23 @@ graph TD
         T --> P --> E --> S
     end
 
+    subgraph "Multi-Agent"
+        REG[Agent Registry]
+        A1[Agent 1<br/>Node 1]
+        A2[Agent 2<br/>Node 2]
+        A1 <-->|route| REG
+        A2 <-->|route| REG
+    end
+
     subgraph "LLM Backends"
         OAI[OpenAI<br/>GPT-4o]
         GEM[Gemini<br/>2.5 Flash]
-        OLL[Ollama<br/>Llama 3]
+        CLD[Claude<br/>Opus · Sonnet]
+        OLL[Ollama<br/>Llama 3 · local]
     end
 
     subgraph "Tool Layer — MCP Server"
-        MCP[23 MCP Tools<br/>btc_* · ln_* · network_health]
+        MCP[28 MCP Tools<br/>btc_* · ln_* · network_health]
     end
 
     subgraph "Infrastructure"
@@ -47,9 +57,11 @@ graph TD
     end
 
     UI -->|prompt| T
+    UI --- SEC
     S -->|report| UI
     T -.->|LLM| OAI
     T -.->|LLM| GEM
+    T -.->|LLM| CLD
     T -.->|LLM| OLL
     P -.->|LLM| OAI
     S -.->|LLM| OAI
@@ -81,12 +93,14 @@ graph TD
 |-------|-----------|
 | Blockchain | Bitcoin Core (regtest) |
 | Payment Network | Core Lightning (CLN) |
-| Tool Protocol | Model Context Protocol (MCP) — 23 tools |
-| AI Pipeline | Python 3.11+, 4-stage pipeline with per-stage LLM config |
-| LLM Backends | OpenAI (GPT-4o), Google Gemini (2.5 Flash), Ollama (Llama 3, local) |
+| Tool Protocol | Model Context Protocol (MCP) — 28 tools |
+| AI Pipeline | Python 3.10+, 4-stage pipeline with per-stage LLM config |
+| LLM Backends | OpenAI (GPT-4o), Anthropic (Claude), Google Gemini (2.5 Flash), Ollama (local) |
+| Multi-Agent | Agent registry, inter-agent routing, per-node pipeline instances |
 | Safety | GuardedBackend (rate limiting, exponential backoff, circuit breaker) |
+| Security | Session auth, CSRF, rate limiting, RBAC, TLS, audit logging, secrets encryption |
 | Web UI | Vanilla HTML/CSS/JS, Server-Sent Events (SSE), D3.js network graph |
-| CI | GitHub Actions — pytest on every push |
+| Testing | 419 tests — pytest on GitHub Actions CI |
 
 ---
 
