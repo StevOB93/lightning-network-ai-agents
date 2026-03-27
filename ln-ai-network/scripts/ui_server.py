@@ -63,6 +63,15 @@ _CONFIG_KEYS: frozenset[str] = frozenset({
       for b in ("OPENAI", "OLLAMA", "GEMINI", "CLAUDE")),
 })
 
+# Config keys that must be positive integers when set.
+_NUMERIC_CONFIG_KEYS: frozenset[str] = frozenset({
+    "MCP_CALL_TIMEOUT_S",
+    "MCP_NODE_START_TIMEOUT_S",
+    "MCP_NODE_STOP_TIMEOUT_S",
+    "REGTEST_TARGET_HEIGHT",
+    "UI_PORT",
+})
+
 # API key env vars — returned masked (never exposed in full via the HTTP API).
 _API_KEY_KEYS: frozenset[str] = frozenset({
     "OPENAI_API_KEY",
@@ -1234,20 +1243,37 @@ class UIHandler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "Expected JSON object"})
                 return
-            # Validate config values: max 500 chars, no control characters
+            # Validate config values: max 500 chars, no control characters,
+            # numeric fields must be valid positive integers.
             sanitized: dict[str, str] = {}
+            rejected: list[str] = []
             for k, v in data.items():
-                sv = str(v)
+                sv = str(v).strip()
                 if len(sv) > 500:
+                    rejected.append(k)
                     continue
                 # Reject control characters (except normal whitespace)
                 if any(ord(c) < 32 and c not in ('\n', '\r', '\t') for c in sv):
+                    rejected.append(k)
                     continue
+                # Numeric fields must be valid positive integers
+                if k in _NUMERIC_CONFIG_KEYS and sv:
+                    try:
+                        n = int(sv)
+                        if n <= 0:
+                            rejected.append(k)
+                            continue
+                    except ValueError:
+                        rejected.append(k)
+                        continue
                 sanitized[k] = sv
             _write_config(sanitized)
             saved_keys = [k for k in sanitized if k in _CONFIG_KEYS]
             _audit_logger.log_config_change(user=user, keys=saved_keys, ip=ip)
-            self._json(HTTPStatus.OK, {"saved": saved_keys})
+            resp: dict[str, Any] = {"saved": saved_keys}
+            if rejected:
+                resp["rejected"] = rejected
+            self._json(HTTPStatus.OK, resp)
 
         elif parsed.path == "/api/restart_agent":
             restart_script = REPO_ROOT / "scripts" / "restart_agent.sh"
