@@ -6,13 +6,19 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ai.controllers.shared import _env_int
 from ai.mcp_client import MCPClient, MCPTimeoutError
 from ai.models import ExecutionPlan, PlanStep, StepResult
 from ai.tools import _is_tool_error, _normalize_tool_args, _summarize_tool_result
-from scripts.x402 import extract_x402
+from scripts.x402 import (
+    clear_approval_files,
+    extract_x402,
+    read_approval_response,
+    write_approval_request,
+)
 
 
 # =============================================================================
@@ -64,6 +70,10 @@ class ExecutorConfig:
     x402_auto_pay: bool = False
     x402_pay_from_node: int = 1
     x402_max_amount_msat: int = 100_000_000  # safety cap: 100k sats
+    # Payments above this threshold (but below the hard cap) require human
+    # approval via the web UI before the executor pays the invoice.
+    x402_approval_threshold_msat: int = 50_000_000  # 50k sats
+    x402_approval_timeout_s: int = 120
 
     @staticmethod
     def from_env() -> ExecutorConfig:
@@ -79,6 +89,8 @@ class ExecutorConfig:
             x402_auto_pay=bool(os.getenv("EXECUTOR_X402_AUTO_PAY", "")),
             x402_pay_from_node=_env_int("EXECUTOR_X402_PAY_NODE", 1),
             x402_max_amount_msat=_env_int("EXECUTOR_X402_MAX_AMOUNT_MSAT", 100_000_000),
+            x402_approval_threshold_msat=_env_int("X402_APPROVAL_THRESHOLD_MSAT", 50_000_000),
+            x402_approval_timeout_s=_env_int("X402_APPROVAL_TIMEOUT_S", 120),
         )
 
 
@@ -307,10 +319,21 @@ class Executor:
         config: ExecutorConfig,
         mcp: MCPClient,
         trace: Any,
+        agent_dir: Optional[Path] = None,
     ) -> None:
         self.config = config
         self.mcp = mcp
         self.trace = trace  # TraceLogger shared with all pipeline stages
+
+        # Resolve the agent runtime directory for x402 approval files.
+        if agent_dir is not None:
+            self._agent_dir = agent_dir
+        elif hasattr(trace, "path") and trace.path is not None:
+            self._agent_dir = trace.path.parent
+        else:
+            self._agent_dir = Path("runtime/agent")
+        # Clean up stale approval files from previous (possibly crashed) runs.
+        clear_approval_files(self._agent_dir)
 
         # Warn when parallel execution is enabled with a non-thread-safe MCP client.
         # FastMCPClientWrapper serialises calls through a single threading.Lock, so
@@ -467,6 +490,120 @@ class Executor:
                     )
         return wave_results  # type: ignore[return-value]  # all slots filled
 
+    # -----------------------------------------------------------------
+    # x402 payment helpers
+    # -----------------------------------------------------------------
+
+    def _x402_pay(
+        self,
+        x402_info: dict[str, Any],
+        req_id: int,
+        step: PlanStep,
+    ) -> Optional[bool]:
+        """Pay an x402 invoice silently (below threshold).
+
+        Returns ``True`` if the payment succeeded (caller should retry the
+        tool call), ``None`` if the payment itself failed, or ``False`` if
+        the amount was zero / missing (should not happen in practice).
+        """
+        amt = x402_info.get("amount_msat", 0)
+        self.trace.log({
+            "event": "x402_payment",
+            "stage": "executor",
+            "req_id": req_id,
+            "step_id": step.step_id,
+            "tool": step.tool,
+            "bolt11": x402_info["bolt11"][:30] + "...",
+            "amount_msat": amt,
+        })
+        pay_result = self.mcp.call("ln_pay", args={
+            "from_node": self.config.x402_pay_from_node,
+            "bolt11": x402_info["bolt11"],
+        })
+        if not _is_tool_error(pay_result):
+            self.trace.log({
+                "event": "x402_paid",
+                "stage": "executor",
+                "req_id": req_id,
+                "step_id": step.step_id,
+                "amount_msat": amt,
+            })
+            return True
+        return None  # payment failed
+
+    def _x402_approve_and_pay(
+        self,
+        x402_info: dict[str, Any],
+        req_id: int,
+        step: PlanStep,
+    ) -> Optional[bool]:
+        """Request human approval and, if approved, pay the invoice.
+
+        Returns ``True`` if approved and paid (caller should retry the tool
+        call), ``False`` if denied or timed out, ``None`` if approved but the
+        payment itself failed.
+        """
+        amt = x402_info.get("amount_msat", 0)
+
+        # Write the pending approval request so the UI can display it.
+        self.trace.log({
+            "event": "x402_approval_requested",
+            "stage": "executor",
+            "req_id": req_id,
+            "step_id": step.step_id,
+            "tool": step.tool,
+            "amount_msat": amt,
+        })
+        write_approval_request(self._agent_dir, {
+            "ts": time.time(),
+            "req_id": req_id,
+            "step_id": step.step_id,
+            "tool": step.tool,
+            "bolt11": x402_info["bolt11"],
+            "amount_msat": amt,
+            "payment_hash": x402_info.get("payment_hash", ""),
+        })
+
+        # Poll for the response file until timeout.
+        deadline = time.time() + self.config.x402_approval_timeout_s
+        response: Optional[dict[str, Any]] = None
+        while time.time() < deadline:
+            response = read_approval_response(self._agent_dir)
+            if response is not None:
+                break
+            time.sleep(0.5)
+
+        clear_approval_files(self._agent_dir)
+
+        if response is None:
+            self.trace.log({
+                "event": "x402_approval_timeout",
+                "stage": "executor",
+                "req_id": req_id,
+                "step_id": step.step_id,
+            })
+            return False
+
+        if not response.get("approved", False):
+            self.trace.log({
+                "event": "x402_denied",
+                "stage": "executor",
+                "req_id": req_id,
+                "step_id": step.step_id,
+                "amount_msat": amt,
+            })
+            return False
+
+        # User approved — proceed with payment.
+        self.trace.log({
+            "event": "x402_approved",
+            "stage": "executor",
+            "req_id": req_id,
+            "step_id": step.step_id,
+            "amount_msat": amt,
+        })
+        return self._x402_pay(x402_info, req_id, step)
+
     def _execute_step(
         self,
         step: PlanStep,
@@ -598,39 +735,41 @@ class Executor:
                 raw = {"error": _exc_msg}
 
             # x402 auto-pay: if the tool returned a 402 payment-required
-            # response, pay the invoice and retry the tool call.
+            # response, decide how to handle it based on the amount:
+            #   - above hard cap → refuse
+            #   - above approval threshold → request human approval
+            #   - below threshold → auto-pay silently
             x402_info = extract_x402(raw)
             if x402_info and self.config.x402_auto_pay:
                 amt = x402_info.get("amount_msat", 0)
-                if amt <= self.config.x402_max_amount_msat:
-                    self.trace.log({
-                        "event": "x402_payment",
-                        "stage": "executor",
-                        "req_id": req_id,
-                        "step_id": step.step_id,
-                        "tool": step.tool,
-                        "bolt11": x402_info["bolt11"][:30] + "...",
-                        "amount_msat": amt,
-                    })
-                    pay_result = self.mcp.call("ln_pay", args={
-                        "from_node": self.config.x402_pay_from_node,
-                        "bolt11": x402_info["bolt11"],
-                    })
-                    if not _is_tool_error(pay_result):
-                        # Payment succeeded — retry the tool call on the next
-                        # iteration (the 402 counts as a retryable event, not
-                        # a real tool error).
-                        self.trace.log({
-                            "event": "x402_paid",
-                            "stage": "executor",
-                            "req_id": req_id,
-                            "step_id": step.step_id,
-                            "amount_msat": amt,
-                        })
+                if amt > self.config.x402_max_amount_msat:
+                    # Hard cap exceeded — refuse
+                    raw = {
+                        "error": (
+                            f"x402 amount {amt} msat exceeds safety cap "
+                            f"{self.config.x402_max_amount_msat} msat"
+                        )
+                    }
+                elif amt > self.config.x402_approval_threshold_msat:
+                    # Above threshold — request human approval
+                    paid_ok = self._x402_approve_and_pay(
+                        x402_info, req_id, step,
+                    )
+                    if paid_ok:
                         continue  # retry the tool call
+                    elif paid_ok is None:
+                        raw = {"error": "x402 payment failed after approval"}
                     else:
-                        # Payment failed — treat as a normal tool error
-                        raw = {"error": f"x402 payment failed: {_is_tool_error(pay_result)}"}
+                        raw = {"error": "x402 payment denied by user or timed out"}
+                else:
+                    # Below threshold — auto-pay silently
+                    paid_ok = self._x402_pay(x402_info, req_id, step)
+                    if paid_ok:
+                        continue  # retry the tool call
+                    elif paid_ok is None:
+                        raw = {"error": "x402 payment failed"}
+                    # paid_ok is False only when extract returned no amount;
+                    # fall through to normal tool-error handling
 
             tool_err = _is_tool_error(raw)
 

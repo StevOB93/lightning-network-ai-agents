@@ -1816,3 +1816,12 @@ input.clear-confirm-input {
   border-radius: var(--radius); cursor: pointer;
 }
 .x402-invoice-box .btn-sm:hover { background: var(--accent); color: var(--bg); }
+.x402-approval-buttons { display: flex; gap: 12px; margin-top: 16px; justify-content: center; }
+.x402-approval-buttons .btn-primary { flex: 1; }
+.x402-approval-buttons .btn-danger-sm {
+  flex: 0 0 auto; padding: 10px 20px; font-size: 0.9rem;
+  background: var(--red, #e74c3c); color: #fff; border: none;
+  border-radius: var(--radius); cursor: pointer;
+}
+.x402-approval-buttons .btn-danger-sm:hover { opacity: 0.85; }
+.field-hint { display: block; font-size: 0.72rem; color: var(--text-dim); margin-top: 2px; }

@@ -79,6 +79,30 @@
     </div>
   </div>
 
+  <!-- x402 Approval overlay — executor requests human approval for large payments -->
+  <div id="x402-approval-overlay" class="login-overlay" style="display:none">
+    <div class="login-card">
+      <div class="login-header">
+        <span class="bolt">&#9889;</span>
+        <h1>Payment Approval Required</h1>
+      </div>
+      <p class="login-subtitle">The AI agent wants to pay a Lightning invoice that exceeds your auto-pay threshold.</p>
+      <div class="x402-details">
+        <div class="x402-row"><span class="x402-label">Amount:</span> <strong id="x402-approve-amount"></strong></div>
+        <div class="x402-row"><span class="x402-label">Tool:</span> <span id="x402-approve-tool"></span></div>
+        <div class="x402-row"><span class="x402-label">Step:</span> <span id="x402-approve-step"></span></div>
+        <div class="x402-invoice-box">
+          <label>BOLT11 Invoice</label>
+          <textarea id="x402-approve-bolt11" readonly rows="3"></textarea>
+        </div>
+      </div>
+      <div class="x402-approval-buttons">
+        <button type="button" id="x402-approve-btn" class="btn-primary login-btn">Approve Payment</button>
+        <button type="button" id="x402-deny-btn" class="btn-danger-sm">Deny</button>
+      </div>
+    </div>
+  </div>
+
   <div class="page-shell">
 
     <!-- ── Status bar ── persistent across all tabs ── -->
@@ -547,6 +571,27 @@
               <div class="settings-field">
                 <label for="cfg-ui-port">Port</label>
                 <input id="cfg-ui-port" class="settings-input" type="number" data-key="UI_PORT" min="1024" max="65535">
+              </div>
+            </div>
+          </div>
+
+          <!-- x402 Payment Gateway -->
+          <div class="settings-group">
+            <div class="settings-group-title">x402 Payment Gateway</div>
+            <div class="settings-fields">
+              <div class="settings-field">
+                <label for="cfg-x402-threshold">Approval Threshold (msat)</label>
+                <input id="cfg-x402-threshold" class="settings-input" type="number"
+                       data-key="X402_APPROVAL_THRESHOLD_MSAT" min="0" max="100000000000"
+                       placeholder="50000000">
+                <small class="field-hint">Payments above this require your approval. Default: 50,000,000 msat (50k sats).</small>
+              </div>
+              <div class="settings-field">
+                <label for="cfg-x402-timeout">Approval Timeout (seconds)</label>
+                <input id="cfg-x402-timeout" class="settings-input" type="number"
+                       data-key="X402_APPROVAL_TIMEOUT_S" min="10" max="600"
+                       placeholder="120">
+                <small class="field-hint">How long the agent waits for your approval before timing out.</small>
               </div>
             </div>
           </div>

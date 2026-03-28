@@ -56,6 +56,9 @@ _CONFIG_KEYS: frozenset[str] = frozenset({
     "REGTEST_TARGET_HEIGHT",
     "UI_HOST",
     "UI_PORT",
+    # x402 payment gateway
+    "X402_APPROVAL_THRESHOLD_MSAT",
+    "X402_APPROVAL_TIMEOUT_S",
     # Per-stage LLM backend overrides (e.g. TRANSLATOR_LLM_BACKEND=gemini)
     *(f"{r}_LLM_BACKEND" for r in _PIPELINE_ROLES),
     # Per-stage model overrides (e.g. TRANSLATOR_OPENAI_MODEL=gpt-4o-mini)
@@ -70,6 +73,8 @@ _NUMERIC_CONFIG_KEYS: frozenset[str] = frozenset({
     "MCP_NODE_STOP_TIMEOUT_S",
     "REGTEST_TARGET_HEIGHT",
     "UI_PORT",
+    "X402_APPROVAL_THRESHOLD_MSAT",
+    "X402_APPROVAL_TIMEOUT_S",
 })
 
 # API key env vars — returned masked (never exposed in full via the HTTP API).
@@ -569,6 +574,7 @@ def _runtime_snapshot() -> dict[str, Any]:
         "multi_agent": multi_agent,     # True when MULTI_AGENT=1
         "agents": agents,              # Per-agent online status (multi-agent only)
         "x402_enabled": _X402_ENABLED and _x402_paywall is not None,
+        "x402_pending": (RUNTIME_DIR / "x402_pending.json").exists(),
     }
 
 
@@ -1007,6 +1013,7 @@ class UIHandler(BaseHTTPRequestHandler):
         last_outbox_mtime: float = 0.0
         last_trace_mtime: float = 0.0
         last_inbox_mtime: float = 0.0
+        last_x402_mtime: float = 0.0
 
         # Send a full state snapshot immediately on connect so the browser
         # doesn't show a blank UI while waiting for the first poll cycle.
@@ -1051,6 +1058,21 @@ class UIHandler(BaseHTTPRequestHandler):
                         last_inbox_mtime = mtime
                         if not send("status", _runtime_snapshot()):
                             return
+
+                # x402 approval request — executor is waiting for user decision
+                x402_pending_path = RUNTIME_DIR / "x402_pending.json"
+                if x402_pending_path.exists():
+                    mtime = x402_pending_path.stat().st_mtime
+                    if mtime > last_x402_mtime:
+                        last_x402_mtime = mtime
+                        try:
+                            pending_data = json.loads(
+                                x402_pending_path.read_text(encoding="utf-8")
+                            )
+                            if not send("x402_approval", pending_data):
+                                return
+                        except (json.JSONDecodeError, OSError):
+                            pass
 
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass  # Client disconnected cleanly — no error logging needed
@@ -1405,6 +1427,12 @@ class UIHandler(BaseHTTPRequestHandler):
                     print(f"[ERROR] Failed to launch restart_agent.sh fresh: {exc}", flush=True)
 
             threading.Thread(target=_do_fresh, daemon=True).start()
+
+        elif parsed.path == "/api/x402_approve":
+            approved = bool(data.get("approved", False))
+            from scripts.x402 import write_approval_response
+            write_approval_response(RUNTIME_DIR, approved)
+            self._json(HTTPStatus.OK, {"ok": True, "approved": approved})
 
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown endpoint"})

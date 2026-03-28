@@ -13,13 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock
+from typing import Any
 
 import pytest
 
@@ -32,10 +30,13 @@ from scripts.x402 import (
     InvoiceStore,
     PendingInvoice,
     X402Paywall,
-    X402Result,
+    clear_approval_files,
     create_x402_response,
     extract_x402,
+    read_approval_response,
     verify_preimage,
+    write_approval_request,
+    write_approval_response,
 )
 
 
@@ -460,3 +461,222 @@ class TestExecutorX402Integration:
         results = executor.execute(plan, req_id=1)
         assert len(results) == 1
         # With auto-pay disabled, the 402 passes through as a normal result.
+
+
+# =============================================================================
+# Approval file helpers
+# =============================================================================
+
+class TestApprovalFileHelpers:
+    """Test the file-based approval request/response helpers."""
+
+    def test_write_and_read_cycle(self, tmp_path):
+        data = {"req_id": 1, "amount_msat": 75000, "bolt11": "lnbcrt..."}
+        write_approval_request(tmp_path, data)
+        assert (tmp_path / "x402_pending.json").exists()
+
+        # Response not written yet
+        assert read_approval_response(tmp_path) is None
+
+        # Write response
+        write_approval_response(tmp_path, approved=True)
+        resp = read_approval_response(tmp_path)
+        assert resp is not None
+        assert resp["approved"] is True
+        assert "ts" in resp
+
+    def test_clear_removes_both_files(self, tmp_path):
+        write_approval_request(tmp_path, {"test": 1})
+        write_approval_response(tmp_path, approved=False)
+        clear_approval_files(tmp_path)
+        assert not (tmp_path / "x402_pending.json").exists()
+        assert not (tmp_path / "x402_response.json").exists()
+
+    def test_clear_safe_when_no_files(self, tmp_path):
+        """clear_approval_files should not raise when files don't exist."""
+        clear_approval_files(tmp_path)  # should not raise
+
+    def test_denied_response(self, tmp_path):
+        write_approval_response(tmp_path, approved=False)
+        resp = read_approval_response(tmp_path)
+        assert resp["approved"] is False
+
+
+# =============================================================================
+# Executor x402 approval flow (mock MCP)
+# =============================================================================
+
+class TestExecutorApprovalFlow:
+    """Test executor human-approval threshold logic with mock MCP."""
+
+    def _make_executor(self, mcp_responses: list[dict], tmp_path: Path,
+                       threshold_msat: int = 50_000,
+                       max_msat: int = 100_000_000,
+                       timeout_s: int = 5) -> Any:
+        from ai.controllers.executor import Executor, ExecutorConfig
+        from ai.utils import TraceLogger
+
+        call_index = {"i": 0}
+        class MockMCP:
+            def call(self, tool, args=None):
+                idx = call_index["i"]
+                call_index["i"] += 1
+                if idx < len(mcp_responses):
+                    return mcp_responses[idx]
+                return {"ok": True, "payload": {}}
+
+        trace = TraceLogger(tmp_path / "trace.log")
+        config = ExecutorConfig(
+            x402_auto_pay=True,
+            x402_pay_from_node=2,
+            x402_max_amount_msat=max_msat,
+            x402_approval_threshold_msat=threshold_msat,
+            x402_approval_timeout_s=timeout_s,
+        )
+        return Executor(mcp=MockMCP(), trace=trace, config=config, agent_dir=tmp_path)
+
+    def _make_plan(self):
+        from ai.models import ExecutionPlan, PlanStep
+        return ExecutionPlan(
+            steps=[
+                PlanStep(step_id=1, tool="ln_listfunds", args={"node": 1},
+                         expected_outcome="funds listed", depends_on=[],
+                         on_error="retry", max_retries=2),
+            ],
+            plan_rationale="test", intent=None,
+        )
+
+    def test_auto_pay_below_threshold(self, tmp_path):
+        """Amount below threshold → auto-pay without approval file."""
+        executor = self._make_executor([
+            {"result": {"status": 402, "bolt11": "lnbcrt...", "amount_msat": 1000, "payment_hash": "abc"}},
+            {"result": {"ok": True, "payload": {"payment_preimage": "ff" * 32}}},
+            {"result": {"ok": True, "payload": {"balance": 50000}}},
+        ], tmp_path, threshold_msat=50_000)
+
+        results = executor.execute(self._make_plan(), req_id=1)
+        assert results[0].ok is True
+        # No approval file should have been written
+        assert not (tmp_path / "x402_pending.json").exists()
+
+    def test_approval_requested_and_approved(self, tmp_path):
+        """Amount above threshold → approval requested, approved, paid."""
+        executor = self._make_executor([
+            {"result": {"status": 402, "bolt11": "lnbcrt...", "amount_msat": 75000, "payment_hash": "abc"}},
+            {"result": {"ok": True, "payload": {"payment_preimage": "ff" * 32}}},
+            {"result": {"ok": True, "payload": {"balance": 50000}}},
+        ], tmp_path, threshold_msat=50_000)
+
+        # Write approval response from a background thread (simulating the UI)
+        def approve_after_delay():
+            time.sleep(0.3)
+            write_approval_response(tmp_path, approved=True)
+
+        t = threading.Thread(target=approve_after_delay)
+        t.start()
+
+        results = executor.execute(self._make_plan(), req_id=1)
+        t.join()
+        assert results[0].ok is True
+
+    def _make_abort_plan(self):
+        """Plan with on_error=abort so failures raise ExecutorError."""
+        from ai.models import ExecutionPlan, PlanStep
+        return ExecutionPlan(
+            steps=[
+                PlanStep(step_id=1, tool="ln_listfunds", args={"node": 1},
+                         expected_outcome="funds listed", depends_on=[],
+                         on_error="abort", max_retries=0),
+            ],
+            plan_rationale="test", intent=None,
+        )
+
+    def test_approval_denied(self, tmp_path):
+        """Amount above threshold → approval denied → step fails."""
+        executor = self._make_executor([
+            {"result": {"status": 402, "bolt11": "lnbcrt...", "amount_msat": 75000, "payment_hash": "abc"}},
+        ], tmp_path, threshold_msat=50_000)
+
+        def deny_after_delay():
+            time.sleep(0.3)
+            write_approval_response(tmp_path, approved=False)
+
+        t = threading.Thread(target=deny_after_delay)
+        t.start()
+
+        from ai.controllers.executor import ExecutorError
+        with pytest.raises(ExecutorError, match="denied"):
+            executor.execute(self._make_abort_plan(), req_id=1)
+        t.join()
+
+    def test_approval_timeout(self, tmp_path):
+        """No response within timeout → step fails."""
+        executor = self._make_executor([
+            {"result": {"status": 402, "bolt11": "lnbcrt...", "amount_msat": 75000, "payment_hash": "abc"}},
+        ], tmp_path, threshold_msat=50_000, timeout_s=1)
+
+        from ai.controllers.executor import ExecutorError
+        with pytest.raises(ExecutorError, match="denied|timed out"):
+            executor.execute(self._make_abort_plan(), req_id=1)
+
+    def test_hard_cap_exceeded(self, tmp_path):
+        """Amount above hard cap → refused, no approval file."""
+        executor = self._make_executor([
+            {"result": {"status": 402, "bolt11": "lnbcrt...", "amount_msat": 200_000_000, "payment_hash": "abc"}},
+        ], tmp_path, threshold_msat=50_000, max_msat=100_000_000)
+
+        from ai.controllers.executor import ExecutorError
+        with pytest.raises(ExecutorError, match="safety cap"):
+            executor.execute(self._make_abort_plan(), req_id=1)
+        assert not (tmp_path / "x402_pending.json").exists()
+
+    def test_stale_files_cleaned_on_init(self, tmp_path):
+        """Constructor should clean up leftover approval files."""
+        write_approval_request(tmp_path, {"stale": True})
+        write_approval_response(tmp_path, approved=True)
+
+        from ai.controllers.executor import Executor, ExecutorConfig
+        from ai.utils import TraceLogger
+
+        class DummyMCP:
+            def call(self, tool, args=None):
+                return {}
+
+        trace = TraceLogger(tmp_path / "trace.log")
+        config = ExecutorConfig(x402_auto_pay=True)
+        Executor(mcp=DummyMCP(), trace=trace, config=config, agent_dir=tmp_path)
+
+        assert not (tmp_path / "x402_pending.json").exists()
+        assert not (tmp_path / "x402_response.json").exists()
+
+    def test_trace_events_emitted(self, tmp_path):
+        """Check that approval trace events are logged."""
+        executor = self._make_executor([
+            {"result": {"status": 402, "bolt11": "lnbcrt...", "amount_msat": 75000, "payment_hash": "abc"}},
+            {"result": {"ok": True, "payload": {"payment_preimage": "ff" * 32}}},
+            {"result": {"ok": True, "payload": {"balance": 50000}}},
+        ], tmp_path, threshold_msat=50_000)
+
+        def approve_after_delay():
+            time.sleep(0.3)
+            write_approval_response(tmp_path, approved=True)
+
+        t = threading.Thread(target=approve_after_delay)
+        t.start()
+
+        executor.execute(self._make_plan(), req_id=1)
+        t.join()
+
+        # Read trace events from the log file
+        trace_path = tmp_path / "trace.log"
+        if trace_path.exists():
+            events = []
+            for line in trace_path.read_text().splitlines():
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+            event_types = [e.get("event") for e in events]
+            assert "x402_approval_requested" in event_types
+            assert "x402_approved" in event_types
+            assert "x402_paid" in event_types

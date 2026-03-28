@@ -1709,6 +1709,8 @@ if ($("x402-copy-btn")) $("x402-copy-btn").addEventListener("click", () => {
   const bolt11 = $("x402-bolt11");
   if (bolt11) { navigator.clipboard.writeText(bolt11.value).catch(() => {}); }
 });
+if ($("x402-approve-btn")) $("x402-approve-btn").addEventListener("click", () => respondToApproval(true));
+if ($("x402-deny-btn")) $("x402-deny-btn").addEventListener("click", () => respondToApproval(false));
 $("refresh-btn").addEventListener("click", () => refreshAll().catch(e => setLog(e.message, true)));
 $("network-refresh-btn").addEventListener("click", () => fetchNetwork().catch(() => {}));
 $("restart-btn").addEventListener("click",  () => restartSystem().catch(e => setLog(e.message, true)));
@@ -1855,6 +1857,13 @@ function startSSE() {
     try {
       const { events } = JSON.parse(e.data);
       renderTrace(events);
+    } catch (_) {}
+  });
+
+  es.addEventListener("x402_approval", e => {
+    try {
+      const data = JSON.parse(e.data);
+      showApprovalOverlay(data);
     } catch (_) {}
   });
 
@@ -2008,6 +2017,37 @@ function showPaymentOverlay(data) {
 function hidePaymentOverlay() {
   const overlay = $("payment-overlay");
   if (overlay) overlay.style.display = "none";
+}
+
+// ---------------------------------------------------------------------------
+// x402 Approval overlay (human-in-the-loop for large payments)
+// ---------------------------------------------------------------------------
+
+function showApprovalOverlay(data) {
+  const overlay = $("x402-approval-overlay");
+  if (!overlay) return;
+  const amountMsat = data.amount_msat || 0;
+  const amountSat = Math.ceil(amountMsat / 1000);
+  $("x402-approve-amount").textContent = `${amountSat.toLocaleString()} sats (${amountMsat.toLocaleString()} msat)`;
+  $("x402-approve-tool").textContent = data.tool || "unknown";
+  $("x402-approve-step").textContent = `Step ${data.step_id || "?"}`;
+  $("x402-approve-bolt11").value = data.bolt11 || "";
+  overlay.style.display = "";
+}
+
+function hideApprovalOverlay() {
+  const overlay = $("x402-approval-overlay");
+  if (overlay) overlay.style.display = "none";
+}
+
+async function respondToApproval(approved) {
+  try {
+    await postJson("/api/x402_approve", { approved });
+    hideApprovalOverlay();
+    setLog(approved ? "Payment approved — agent will proceed." : "Payment denied.");
+  } catch (e) {
+    setLog("Approval response failed: " + e.message, true);
+  }
 }
 
 /**

@@ -15,10 +15,13 @@ Design follows the same composable, thread-safe patterns as ``security.py``.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import secrets
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 
@@ -315,3 +318,68 @@ def extract_x402(raw: dict[str, Any]) -> Optional[dict[str, Any]]:
             "payment_hash": body.get("payment_hash", ""),
         }
     return None
+
+
+# ---------------------------------------------------------------------------
+# Approval file helpers (executor ↔ UI server coordination)
+# ---------------------------------------------------------------------------
+
+X402_PENDING_FILENAME = "x402_pending.json"
+X402_RESPONSE_FILENAME = "x402_response.json"
+
+
+def write_approval_request(agent_dir: Path, data: dict[str, Any]) -> Path:
+    """Write a pending approval request for the UI to display.
+
+    The executor calls this when an x402 payment exceeds the approval
+    threshold.  The UI server detects the file via mtime polling and
+    pushes an SSE event to the browser.
+    """
+    p = agent_dir / X402_PENDING_FILENAME
+    p.write_text(json.dumps(data, default=str), encoding="utf-8")
+    fd = os.open(str(p), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return p
+
+
+def read_approval_response(agent_dir: Path) -> Optional[dict[str, Any]]:
+    """Read the approval response written by the UI server.
+
+    Returns the parsed dict if the file exists, or ``None`` if it has
+    not been written yet (the user has not responded).
+    """
+    p = agent_dir / X402_RESPONSE_FILENAME
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def write_approval_response(agent_dir: Path, approved: bool) -> Path:
+    """Write the approval response.  Called by the UI server."""
+    p = agent_dir / X402_RESPONSE_FILENAME
+    p.write_text(
+        json.dumps({"approved": approved, "ts": time.time()}),
+        encoding="utf-8",
+    )
+    fd = os.open(str(p), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return p
+
+
+def clear_approval_files(agent_dir: Path) -> None:
+    """Remove both pending and response files.  Safe to call any time."""
+    for name in (X402_PENDING_FILENAME, X402_RESPONSE_FILENAME):
+        p = agent_dir / name
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
